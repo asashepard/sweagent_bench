@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,11 @@ from sweagent_bench.utils.subproc import run as subproc_run
 
 # Valid experimental conditions
 VALID_CONDITIONS = ("no_context", "static_kb", "oracle_tuned")
+
+
+def _elog(msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [experiment] {msg}", flush=True)
 
 
 # ── data classes ───────────────────────────────────────────────
@@ -111,34 +117,50 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
     Returns:
         Path to the experiment results directory.
     """
+    t_run_start = time.perf_counter()
+    _elog(
+        f"Starting run id={config.experiment_id} model={config.model} "
+        f"conditions={config.conditions} dry_run={dry_run}"
+    )
+
     exp_root = RESULTS_DIR / config.experiment_id
     exp_root.mkdir(parents=True, exist_ok=True)
     state_path = exp_root / "experiment_state.json"
 
     if state_path.exists():
         state = ExperimentState.load(state_path)
+        _elog(
+            "Loaded existing state "
+            f"(tuning_completed={len(state.tuning_completed)}, "
+            f"eval_completed={len(state.eval_completed)})"
+        )
     else:
         state = ExperimentState(
             experiment_id=config.experiment_id,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         state.save(state_path)
+        _elog("Initialized new experiment state")
 
     # Save config
     config_path = exp_root / "experiment_config.json"
     config_path.write_text(json.dumps(config.to_dict(), indent=2) + "\n", encoding="utf-8")
+    _elog(f"Saved experiment config to {config_path}")
 
     # Optional repo restriction: if eval instance IDs are provided, tune/prep only
     # repos that appear in those eval instances.
     eval_instances_prefiltered: list[dict] | None = None
     restricted_repos: set[str] | None = None
     if config.eval_instance_ids_file:
+        _elog(f"Prefiltering eval instances from ids file: {config.eval_instance_ids_file}")
         prefilter_ids = read_instance_ids(config.eval_instance_ids_file)
+        _elog(f"Loaded {len(prefilter_ids)} prefilter ids")
         eval_instances_prefiltered = load_instances(
             dataset_name=config.eval_dataset,
             split=config.eval_split,
             instance_ids=prefilter_ids,
         )
+        _elog(f"Prefiltered eval set size: {len(eval_instances_prefiltered)}")
         restricted_repos = {inst["repo"] for inst in eval_instances_prefiltered}
 
         repo_order = [r["repo"] for r in config.repos]
@@ -153,14 +175,17 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
     # ── Phase 1: Build KB + Oracle tuning ──────────────────────
     needs_kb = "static_kb" in config.conditions or "oracle_tuned" in config.conditions
     needs_oracle = "oracle_tuned" in config.conditions
+    _elog(f"Phase 1 setup: needs_kb={needs_kb}, needs_oracle={needs_oracle}")
 
     guidance_map: dict[str, dict[str, RepoGuidance]] = {}
 
     for repo_info in config.repos:
         repo = repo_info["repo"]
         commit = repo_info["commit"]
+        _elog(f"Repo loop entry: {repo}@{commit}")
 
         if restricted_repos is not None and repo not in restricted_repos:
+            _elog(f"Skipping {repo}: not in restricted repo set")
             continue
 
         guidance_map.setdefault(repo, {})
@@ -168,6 +193,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         if not needs_kb:
             if repo in state.tuning_completed:
                 print(f"[experiment] Skipping KB for {repo} (no KB conditions)")
+            _elog(f"Skipping KB/oracle for {repo}: no KB-required conditions")
             continue
 
         if repo in state.tuning_completed:
@@ -180,16 +206,20 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             if best_path.exists():
                 guidance_map[repo]["oracle_tuned"] = RepoGuidance.load(best_path)
             print(f"[experiment] Skipping {repo} (already done)")
+            _elog(f"Loaded cached guidance for {repo} from {g_dir}")
             continue
 
         print(f"\n{'='*60}")
         print(f"[experiment] Processing {repo}")
         print(f"{'='*60}")
+        _elog(f"Processing repo {repo} started")
 
         oracle_iters = config.oracle_iterations if needs_oracle else 0
         out_dir = str(exp_root / "guidance" / repo.replace("/", "__"))
+        _elog(f"Repo {repo}: oracle_iters={oracle_iters}, guidance_out={out_dir}")
 
         if dry_run:
+            t_repo = time.perf_counter()
             g = RepoGuidance(repo=repo, commit=commit, lines=["- (dry run)"], version=0)
             g_out = Path(out_dir)
             g_out.mkdir(parents=True, exist_ok=True)
@@ -198,7 +228,9 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             g.save(g_out / "versions" / "v0.json")
             guidance_map[repo]["static_kb"] = g
             guidance_map[repo]["oracle_tuned"] = g
+            _elog(f"Repo {repo}: dry-run guidance materialized in {time.perf_counter() - t_repo:.2f}s")
         else:
+            t_repo = time.perf_counter()
             oc = OracleConfig(
                 repo=repo,
                 commit=commit,
@@ -208,6 +240,10 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 output_dir=out_dir,
             )
             kb, best = run_oracle_loop(oc)
+            _elog(
+                f"Repo {repo}: oracle loop complete in {time.perf_counter() - t_repo:.2f}s "
+                f"(kb_entries={len(kb.entries)}, best_version={best.version})"
+            )
 
             v0_path = Path(out_dir) / "versions" / "v0.json"
             if v0_path.exists():
@@ -219,11 +255,13 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
 
         state.tuning_completed.append(repo)
         state.save(state_path)
+        _elog(f"Repo {repo}: state persisted (tuning_completed={len(state.tuning_completed)})")
 
     # ── Phase 2: Verified evaluation ───────────────────────────
     print(f"\n{'='*60}")
     print(f"[experiment] Phase 2: SWE-bench Verified evaluation")
     print(f"{'='*60}")
+    _elog("Phase 2 started")
 
     instance_ids = None
     if eval_instances_prefiltered is not None:
@@ -231,28 +269,35 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
     else:
         if config.eval_instance_ids_file:
             instance_ids = read_instance_ids(config.eval_instance_ids_file)
+            _elog(f"Loaded {len(instance_ids)} eval instance IDs")
 
         eval_instances = load_instances(
             dataset_name=config.eval_dataset,
             split=config.eval_split,
             instance_ids=instance_ids,
         )
+    _elog(f"Loaded eval instances: {len(eval_instances)}")
     print(f"  Loaded {len(eval_instances)} eval instances")
 
     # Group instances by repo
     instances_by_repo: dict[str, list[dict]] = {}
     for inst in eval_instances:
         instances_by_repo.setdefault(inst["repo"], []).append(inst)
+    _elog(f"Grouped eval instances into {len(instances_by_repo)} repos")
     expected_instance_ids = {inst["instance_id"] for inst in eval_instances}
     expected_total = len(expected_instance_ids)
 
     eval_results: dict[str, dict] = {}
 
     for condition in config.conditions:
+        t_condition = time.perf_counter()
+        _elog(f"Condition start: {condition}")
         cond_preds_path = PREDS_DIR / config.experiment_id / condition / "preds.jsonl"
         cond_preds_path.parent.mkdir(parents=True, exist_ok=True)
         cond_metrics_path = exp_root / "metrics" / f"{condition}_instances.jsonl"
         cond_metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        _elog(f"Condition {condition}: preds_path={cond_preds_path}")
+        _elog(f"Condition {condition}: metrics_path={cond_metrics_path}")
 
         # Resume support
         completed_ids: set[str] = set()
@@ -262,6 +307,10 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         if cond_metrics_path.exists():
             for rec in read_jsonl(cond_metrics_path):
                 completed_metrics[rec["instance_id"]] = rec
+        _elog(
+            f"Condition {condition}: resume loaded "
+            f"completed_ids={len(completed_ids)} completed_metrics={len(completed_metrics)}"
+        )
 
         total_instances = sum(len(v) for v in instances_by_repo.values())
         done_count = len(completed_ids)
@@ -269,20 +318,35 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         for repo, instances in instances_by_repo.items():
             key = f"{repo}__{condition}"
             if key in state.eval_completed:
+                _elog(f"Condition {condition}: skipping {repo} (already completed key={key})")
                 continue
+
+            _elog(f"Condition {condition}: repo {repo} has {len(instances)} instances")
 
             guidance_text = None
             if condition in ("static_kb", "oracle_tuned"):
                 repo_guidance = guidance_map.get(repo, {}).get(condition)
                 if repo_guidance is not None:
                     guidance_text = repo_guidance.render()
+                    _elog(
+                        f"Condition {condition}: guidance loaded for {repo} "
+                        f"(chars={len(guidance_text)})"
+                    )
+                else:
+                    _elog(f"Condition {condition}: no guidance found for {repo}")
 
             for i, instance in enumerate(instances):
                 iid = instance["instance_id"]
                 if iid in completed_ids:
+                    _elog(f"Condition {condition}: skipping iid={iid} (already in preds)")
                     continue
 
                 try:
+                    t_instance = time.perf_counter()
+                    _elog(
+                        f"Condition {condition}: starting iid={iid} "
+                        f"({i+1}/{len(instances)} in repo {repo})"
+                    )
                     if dry_run:
                         patch = ""
                         run_meta = {
@@ -306,14 +370,25 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                             traj_dir=PREDS_DIR / config.experiment_id / condition / "trajectories",
                             api_base=config.api_base,
                         )
+                        _elog(
+                            f"Condition {condition}: iid={iid} runner status={run_meta.get('status')} "
+                            f"patch_source={run_meta.get('patch_source')} elapsed={run_meta.get('elapsed_s', 0.0):.2f}s"
+                        )
                         patch = run_meta.get("patch", "")
+                        _elog(
+                            f"Condition {condition}: iid={iid} raw patch length={len(patch)}"
+                        )
                         patch, patch_is_noop = sanitize_patch_for_preds(patch)
                         print(
                             f"  [{condition}] {iid} patch sanitation: "
                             f"sanitized_patch_len={len(patch)}, no_op={patch_is_noop}"
                         )
+                        _elog(
+                            f"Condition {condition}: iid={iid} sanitized patch length={len(patch)} no_op={patch_is_noop}"
+                        )
                 except Exception as exc:
                     print(f"  Eval error {iid}: {exc}", file=sys.stderr)
+                    _elog(f"Condition {condition}: iid={iid} exception: {exc}")
                     patch = ""
                     run_meta = {
                         "elapsed_s": 0.0,
@@ -333,6 +408,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 }
                 with cond_preds_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+                _elog(f"Condition {condition}: iid={iid} appended preds record")
 
                 usage = run_meta.get("token_usage", {}) if isinstance(run_meta, dict) else {}
                 metrics_record = {
@@ -361,13 +437,22 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 }
                 with cond_metrics_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(metrics_record, sort_keys=True, ensure_ascii=False) + "\n")
+                _elog(
+                    f"Condition {condition}: iid={iid} appended metrics "
+                    f"status={metrics_record['status']} patch_non_empty={metrics_record['patch_non_empty']}"
+                )
 
                 done_count += 1
                 status = "OK" if patch else "EMPTY"
                 print(f"  [{condition}] [{done_count}/{total_instances}] {iid} -> {status}")
+                _elog(
+                    f"Condition {condition}: completed iid={iid} overall_status={status} "
+                    f"wall={time.perf_counter() - t_instance:.2f}s"
+                )
 
             state.eval_completed.append(key)
             state.save(state_path)
+            _elog(f"Condition {condition}: repo {repo} state key persisted ({key})")
 
         # Run SWE-bench evaluation harness
         run_id = f"{config.experiment_id}__{condition}"
@@ -380,6 +465,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         ]
         logs_dir = exp_root / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
+        _elog(f"Condition {condition}: running swebench harness run_id={run_id}")
 
         rc = subproc_run(
             eval_cmd,
@@ -388,6 +474,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             stderr_path=logs_dir / f"eval_{condition}.stderr.log",
             timeout_s=3600,
         )
+        _elog(f"Condition {condition}: swebench harness exit_code={rc}")
         if rc != 0:
             print(f"  WARNING: eval harness failed for {condition}")
 
@@ -395,6 +482,12 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             cond_metrics_path,
             cond_preds_path,
             expected_instance_ids,
+        )
+        _elog(
+            f"Condition {condition}: generation summary "
+            f"patch_non_empty={generation_metrics['patch_non_empty']} "
+            f"attempted={generation_metrics['attempted']} "
+            f"errors={generation_metrics['error_count']}"
         )
 
         resolved = 0
@@ -404,10 +497,15 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
 
             resolved, _harness_total = load_results(RESULTS_DIR / run_id)
             rate = compute_rate(resolved, expected_total)
+            _elog(
+                f"Condition {condition}: evaluation results loaded resolved={resolved} "
+                f"total={expected_total} rate={rate:.4f}"
+            )
         except Exception as exc:
             print(f"  WARNING: could not load results for {condition}: {exc}")
             load_error = str(exc)
             rate = 0.0
+            _elog(f"Condition {condition}: load_results failed: {exc}")
 
         eval_results[condition] = {
             "run_id": run_id,
@@ -421,6 +519,8 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         }
         if load_error is not None:
             eval_results[condition]["error"] = load_error
+
+        _elog(f"Condition complete: {condition} in {time.perf_counter() - t_condition:.2f}s")
 
     # ── Summary ────────────────────────────────────────────────
     summary = {
@@ -462,6 +562,10 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"\n[experiment] Summary written to {summary_path}")
     print(json.dumps(summary, indent=2))
+    _elog(
+        f"Run complete in {time.perf_counter() - t_run_start:.2f}s; "
+        f"summary_path={summary_path}"
+    )
 
     return exp_root
 

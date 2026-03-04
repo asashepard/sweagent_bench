@@ -94,20 +94,44 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         iter_start = time.perf_counter()
         _olog(f"Iteration {t}/{config.iterations} started for {config.repo}")
 
+        t_probe_gen = time.perf_counter()
         new_probes = generate_probes(
             kb, config.model, agents_md,
             prior_probes=probes, timeout_s=config.timeout_s,
         )
         probes.extend(new_probes)
+        _olog(
+            f"Iteration {t}: generated {len(new_probes)} probes in "
+            f"{time.perf_counter() - t_probe_gen:.2f}s (pool={len(probes)})"
+        )
 
+        t_eval = time.perf_counter()
         results = _evaluate_all_probes_detailed(agents_md, probes, config)
+        _olog(
+            f"Iteration {t}: evaluated {len(results)} probes in "
+            f"{time.perf_counter() - t_eval:.2f}s"
+        )
 
+        t_diag = time.perf_counter()
         llm_edits = diagnose_failures(agents_md, results, config.model, timeout_s=config.timeout_s)
+        _olog(
+            f"Iteration {t}: diagnose_failures proposed {len(llm_edits)} edits in "
+            f"{time.perf_counter() - t_diag:.2f}s"
+        )
         direct_edits = _collect_edits_from_results(results)
+        _olog(f"Iteration {t}: direct edits from probes={len(direct_edits)}")
         edits = _dedupe_edits([*direct_edits, *llm_edits])
+        _olog(f"Iteration {t}: deduped edits={len(edits)}")
 
         if edits:
+            t_apply = time.perf_counter()
             agents_md = apply_edits(agents_md, edits, config.model, timeout_s=config.timeout_s)
+            _olog(
+                f"Iteration {t}: apply_edits complete in "
+                f"{time.perf_counter() - t_apply:.2f}s"
+            )
+        else:
+            _olog(f"Iteration {t}: no edits to apply")
 
         new_version = current.version + 1
         current = RepoGuidance(
@@ -124,6 +148,10 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             "edits_count": len(edits),
         })
         state.save(state_path)
+        _olog(
+            f"Iteration {t}: state saved current_version={state.current_version} "
+            f"completed_iterations={state.completed_iterations}"
+        )
 
         _olog(f"Iteration {t} complete in {time.perf_counter() - iter_start:.2f}s; saved v{new_version}")
 
@@ -143,8 +171,14 @@ def _evaluate_all_probes_detailed(
     results: list[ProbeResult] = []
     for i, probe in enumerate(probes):
         try:
+            t_probe = time.perf_counter()
+            _olog(f"Probe {i+1}/{len(probes)} start id={probe.id}")
             result = evaluate_probe(agents_md, probe, config.model, timeout_s=config.timeout_s)
             results.append(result)
+            _olog(
+                f"Probe {i+1}/{len(probes)} complete in {time.perf_counter() - t_probe:.2f}s "
+                f"reviews={len(result.behavior_reviews)} edits={len(result.proposed_edits)}"
+            )
         except Exception as exc:
             _olog(f"Probe {i+1}/{len(probes)} ERROR: {exc}")
             results.append(ProbeResult(

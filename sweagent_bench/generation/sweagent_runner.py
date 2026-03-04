@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sweagent_bench.generation.patch_utils import extract_diff, sanitize_patch_for_preds
@@ -44,6 +45,11 @@ DEFAULT_MAX_OUTPUT_TOKENS = 512   # single-shot fallback
 AGENT_MAX_TOKENS = 4096           # per-turn budget in the agent loop
 CMD_TIMEOUT_S = 120               # per-command timeout
 STALL_THRESHOLD = 3               # consecutive identical commands → stall
+
+
+def _rlog(msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [runner] {msg}", flush=True)
 
 
 # ── Agent prompts ─────────────────────────────────────────────
@@ -270,14 +276,21 @@ def _run_agent_loop(
 
     deadline = time.perf_counter() + timeout_s
     recent_cmds: list[str] = []
+    _rlog(
+        f"Agent loop start iid={instance.get('instance_id')} repo={instance.get('repo')} "
+        f"max_steps={max_steps} timeout_s={timeout_s}"
+    )
 
     for step in range(max_steps):
+        step_start = time.perf_counter()
         if time.perf_counter() >= deadline:
             info["status"] = "timeout"
             info["error"] = f"Agent timed out after {timeout_s}s at step {step}"
+            _rlog(f"Agent loop timeout at step={step} iid={instance.get('instance_id')}")
             break
 
         info["steps_taken"] = step + 1
+        _rlog(f"Step {step+1}/{max_steps} start iid={instance.get('instance_id')}")
 
         # ── LLM call (env save/restore for api_base) ──
         prev_base = os.environ.get("OPENAI_BASE_URL")
@@ -286,6 +299,7 @@ def _run_agent_loop(
                 os.environ["OPENAI_BASE_URL"] = api_base
 
             remaining = max(30, int(deadline - time.perf_counter()))
+            t_llm = time.perf_counter()
             response_text = chat_completion(
                 model=model,
                 messages=messages,
@@ -293,13 +307,19 @@ def _run_agent_loop(
                 max_tokens=AGENT_MAX_TOKENS,
                 timeout_s=min(remaining, 300),
             )
+            _rlog(
+                f"Step {step+1}: LLM response received in {time.perf_counter() - t_llm:.2f}s "
+                f"chars={len(response_text)}"
+            )
         except ContextLengthError as e:
             info["status"] = "context_length_error"
             info["error"] = str(e)
+            _rlog(f"Step {step+1}: context length error: {e}")
             break
         except Exception as e:
             info["status"] = "error"
             info["error"] = f"LLM call failed at step {step}: {e}"
+            _rlog(f"Step {step+1}: LLM call error: {e}")
             break
         finally:
             if api_base:
@@ -316,6 +336,7 @@ def _run_agent_loop(
 
         # ── Parse response for fenced blocks ──
         blocks = _parse_fenced_blocks(cleaned)
+        _rlog(f"Step {step+1}: parsed fenced blocks count={len(blocks)}")
 
         # Check for diff/patch submission (last block wins)
         diff_candidate = _extract_last_diff_block(cleaned)
@@ -325,6 +346,10 @@ def _run_agent_loop(
             info["diff_block_found"] = True
             messages.append({"role": "assistant", "content": response_text})
             _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", diff_candidate)
+            _rlog(
+                f"Step {step+1}: extracted diff candidate len={len(diff_candidate)} "
+                f"returning patch"
+            )
             return diff_candidate, info
 
         # ── Execute bash blocks ──
@@ -334,6 +359,7 @@ def _run_agent_loop(
         ]
 
         if bash_contents:
+            _rlog(f"Step {step+1}: executing {len(bash_contents)} bash command block(s)")
             observations: list[str] = []
             stalled = False
             for cmd_text in bash_contents:
@@ -349,10 +375,19 @@ def _run_agent_loop(
                     info["stall_detected"] = True
                     info["stall_type"] = "repeated_command"
                     info["stall_repeat_count"] = STALL_THRESHOLD
+                    _rlog(
+                        f"Step {step+1}: stall detected repeated command x{STALL_THRESHOLD}: {cmd}"
+                    )
                     stalled = True
                     break
 
+                _rlog(f"Step {step+1}: running command: {cmd}")
+                t_cmd = time.perf_counter()
                 output = _execute_bash(cmd, repo_dir)
+                _rlog(
+                    f"Step {step+1}: command done in {time.perf_counter() - t_cmd:.2f}s "
+                    f"output_chars={len(output)}"
+                )
                 observations.append(f"$ {cmd}\n{output}")
 
             # Debug: write bash commands + outputs
@@ -371,6 +406,10 @@ def _run_agent_loop(
                 "role": "user",
                 "content": f"## Command Output\n{obs_text}",
             })
+            _rlog(
+                f"Step {step+1}: command observations appended chars={len(obs_text)} "
+                f"step_elapsed={time.perf_counter() - step_start:.2f}s"
+            )
         else:
             # No bash and no diff — check for raw unfenced diff one more time
             if not has_bash:
@@ -379,6 +418,9 @@ def _run_agent_loop(
                     info["diff_block_found"] = True
                     messages.append({"role": "assistant", "content": response_text})
                     _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", raw)
+                    _rlog(
+                        f"Step {step+1}: extracted raw diff fallback len={len(raw)} returning patch"
+                    )
                     return raw, info
 
             # Model produced text without actionable blocks — nudge it
@@ -390,14 +432,23 @@ def _run_agent_loop(
                     "or submit a ```diff block with your fix."
                 ),
             })
+            _rlog(
+                f"Step {step+1}: no actionable block found; nudged model "
+                f"step_elapsed={time.perf_counter() - step_start:.2f}s"
+            )
 
     # ── Last resort: check git diff for any edits the agent made ──
     worktree_patch = _extract_git_diff(repo_dir)
     if worktree_patch:
         info["git_diff_non_empty"] = True
         _debug_write(debug_dir, "git_diff_fallback.txt", worktree_patch)
+        _rlog(f"Agent loop fallback git diff found len={len(worktree_patch)}")
         return worktree_patch, info
 
+    _rlog(
+        f"Agent loop ended without patch iid={instance.get('instance_id')} "
+        f"status={info.get('status')} steps={info.get('steps_taken')}"
+    )
     return "", info
 
 
@@ -435,6 +486,10 @@ def generate_patch_with_sweagent(
     """
     iid = instance["instance_id"]
     start = time.perf_counter()
+    _rlog(
+        f"Instance start iid={iid} repo={instance.get('repo')} commit={instance.get('base_commit')} "
+        f"model={model} timeout_s={timeout_s} max_steps={max_steps}"
+    )
 
     result = {
         "instance_id": iid,
@@ -462,19 +517,24 @@ def generate_patch_with_sweagent(
         # we go up two levels to get the experiment root, then use debug/ subdir
         debug_dir = traj_dir.parent.parent.parent / "debug" / traj_dir.parent.name / iid
         debug_dir.mkdir(parents=True, exist_ok=True)
+        _rlog(f"Instance {iid}: debug enabled dir={debug_dir}")
 
     # ── Checkout repo ──
     try:
         from sweagent_bench.git.checkout import checkout_repo
+        t_checkout = time.perf_counter()
         repo_dir = checkout_repo(instance["repo"], instance["base_commit"])
+        _rlog(f"Instance {iid}: checkout complete in {time.perf_counter() - t_checkout:.2f}s path={repo_dir}")
     except Exception as exc:
         result["status"] = "error"
         result["error"] = f"Checkout failed: {exc}"
         result["elapsed_s"] = time.perf_counter() - start
+        _rlog(f"Instance {iid}: checkout failed: {exc}")
         return result
 
     # ── Agent loop ──
     try:
+        t_loop = time.perf_counter()
         patch, loop_info = _run_agent_loop(
             instance,
             model,
@@ -485,12 +545,17 @@ def generate_patch_with_sweagent(
             api_base=api_base,
             debug_dir=debug_dir,
         )
+        _rlog(
+            f"Instance {iid}: agent loop complete in {time.perf_counter() - t_loop:.2f}s "
+            f"status={loop_info.get('status')} patch_len={len(patch)}"
+        )
     except Exception as exc:
         patch = ""
         loop_info = {
             "status": "error", "error": str(exc),
             "stall_detected": False, "stall_type": None, "stall_repeat_count": 0,
         }
+        _rlog(f"Instance {iid}: agent loop exception: {exc}")
 
     # Propagate loop metadata
     result["status"] = loop_info.get("status", "ok")
@@ -502,10 +567,13 @@ def generate_patch_with_sweagent(
     if patch:
         result["patch"] = patch
         result["patch_source"] = "agent_loop"
+        _rlog(f"Instance {iid}: patch from agent loop len={len(patch)}")
 
     # ── Fallback to single-shot if agent produced no patch ──
     if not patch:
         try:
+            _rlog(f"Instance {iid}: entering single-shot fallback")
+            t_fallback = time.perf_counter()
             patch = _fallback_single_shot(instance, model, guidance_text, api_base)
             if patch:
                 result["patch"] = patch
@@ -513,10 +581,25 @@ def generate_patch_with_sweagent(
                 result["fallback_single_shot_patch_len"] = len(patch)
                 result["fallback_reason"] = "agent_empty_patch"
                 result["patch_source"] = "fallback_single_shot"
+                _rlog(
+                    f"Instance {iid}: fallback produced patch len={len(patch)} "
+                    f"in {time.perf_counter() - t_fallback:.2f}s"
+                )
+            else:
+                _rlog(
+                    f"Instance {iid}: fallback returned empty patch in "
+                    f"{time.perf_counter() - t_fallback:.2f}s"
+                )
         except ContextLengthError:
             result["fallback_reason"] = "context_length_error_in_fallback"
+            _rlog(f"Instance {iid}: fallback context length error")
 
     result["elapsed_s"] = time.perf_counter() - start
+    _rlog(
+        f"Instance done iid={iid} elapsed={result['elapsed_s']:.2f}s "
+        f"status={result['status']} patch_source={result['patch_source']} "
+        f"patch_len={len(result['patch'])}"
+    )
 
     # ── Debug: extraction summary ──
     _debug_write(debug_dir, "extraction_summary.txt", (
