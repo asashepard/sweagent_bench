@@ -24,6 +24,14 @@ def _olog(msg: str) -> None:
     print(f"[{ts}] [oracle] {msg}", flush=True)
 
 
+def _summarize_edit(edit: Edit, max_len: int = 180) -> str:
+    """Compact one-line summary of an edit for logging."""
+    content = " ".join(edit.content.split())
+    if len(content) > max_len:
+        content = content[: max_len - 3] + "..."
+    return f"section={edit.section!r} action={edit.action!r} content={content!r}"
+
+
 def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
     """Run the continuous LLM-driven oracle loop for one repository."""
     out = (
@@ -88,7 +96,6 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         lines=agents_md.splitlines(), version=state.current_version,
     )
 
-    probes: list[Probe] = []
     start_iter = state.completed_iterations + 1
     for t in range(start_iter, config.iterations + 1):
         iter_start = time.perf_counter()
@@ -97,16 +104,20 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         t_probe_gen = time.perf_counter()
         new_probes = generate_probes(
             kb, config.model, agents_md,
-            prior_probes=probes, timeout_s=config.timeout_s,
+            prior_probes=[], timeout_s=config.timeout_s,
         )
-        probes.extend(new_probes)
         _olog(
             f"Iteration {t}: generated {len(new_probes)} probes in "
-            f"{time.perf_counter() - t_probe_gen:.2f}s (pool={len(probes)})"
+            f"{time.perf_counter() - t_probe_gen:.2f}s (pool={len(new_probes)})"
         )
+        if new_probes:
+            probe_ids = ", ".join(p.id for p in new_probes)
+            _olog(f"Iteration {t}: probe ids this round: {probe_ids}")
+        else:
+            _olog(f"Iteration {t}: no probes generated; continuing with empty result set")
 
         t_eval = time.perf_counter()
-        results = _evaluate_all_probes_detailed(agents_md, probes, config)
+        results = _evaluate_all_probes_detailed(agents_md, new_probes, config)
         _olog(
             f"Iteration {t}: evaluated {len(results)} probes in "
             f"{time.perf_counter() - t_eval:.2f}s"
@@ -122,13 +133,23 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         _olog(f"Iteration {t}: direct edits from probes={len(direct_edits)}")
         edits = _dedupe_edits([*direct_edits, *llm_edits])
         _olog(f"Iteration {t}: deduped edits={len(edits)}")
+        if edits:
+            for idx, edit in enumerate(edits, start=1):
+                _olog(f"Iteration {t}: edit {idx}/{len(edits)} -> {_summarize_edit(edit)}")
+        else:
+            _olog(f"Iteration {t}: no deduped edits to apply")
 
         if edits:
             t_apply = time.perf_counter()
+            before_agents_md = agents_md
             agents_md = apply_edits(agents_md, edits, config.model, timeout_s=config.timeout_s)
             _olog(
                 f"Iteration {t}: apply_edits complete in "
                 f"{time.perf_counter() - t_apply:.2f}s"
+            )
+            _olog(
+                f"Iteration {t}: AGENTS.md length {len(before_agents_md)} -> {len(agents_md)} "
+                f"(delta={len(agents_md) - len(before_agents_md)})"
             )
         else:
             _olog(f"Iteration {t}: no edits to apply")
@@ -144,7 +165,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         state.completed_iterations = t
         state.history.append({
             "version": new_version, "iteration": t,
-            "probe_pool_size": len(probes), "new_probes": len(new_probes),
+            "probe_pool_size": len(new_probes), "new_probes": len(new_probes),
             "edits_count": len(edits),
         })
         state.save(state_path)
