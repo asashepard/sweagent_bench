@@ -20,6 +20,9 @@ Output a JSON array of edit objects, each with:
 Rules:
 - Be specific and actionable.
 - Prefer "strengthen" or "modify" over adding duplicate rules.
+- Edits are optional: if diagnostics indicate guidance is already strong, return [].
+- If there are multiple distinct high-confidence issues, you may return multiple edits.
+- Avoid speculative or low-confidence edits.
 - Keep the total AGENTS.md under 3,200 characters.
 - Output ONLY the JSON array."""
 

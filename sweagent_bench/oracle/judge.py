@@ -39,6 +39,11 @@ Return a JSON object with this exact shape:
 
 Rules:
 - Prefer concrete, testable edits over vague advice.
+- Proposed edits are optional.
+- If behavior is already strong enough, return an empty "proposed_edits": [].
+- If behavior has multiple independent gaps, propose multiple edits.
+- Only propose edits you are confident will materially improve future behavior.
+- Do NOT force edits just to fill the list.
 - Output ONLY valid JSON."""
 
 _JUDGE_USER = """\
