@@ -7,7 +7,6 @@ name = "sweagent-bench"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "sweagent>=0.7",
     "swebench>=2.0.0",
     "requests>=2.31.0",
     "datasets>=2.14.0",

@@ -1,6 +1,3 @@
-# Core agent
-sweagent>=0.7
-
 # SWE-bench harness (eval-time only)
 swebench>=2.0.0
 

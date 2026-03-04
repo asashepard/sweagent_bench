@@ -1,92 +1,317 @@
-"""SWE-agent runner — invokes SWE-agent per-instance for patch generation.
+"""Mini-swe-agent runner — inline iterative agent loop for patch generation.
 
-This is the NEW module replacing mini-swe-agent. Uses SWE-agent's stable
-tool protocol (bash + file-editor tools) with Qwen 3.5 35B via vLLM.
+Replaces SWE-agent subprocess with a lightweight agent loop that:
+1. Checks out the repo via git worktree.
+2. Presents the issue + repo structure to the LLM.
+3. Loops up to max_steps, letting the model run bash commands.
+4. Captures submitted diff patches from model output.
+5. Falls back to single-shot generation if no patch produced.
 
 Key design decisions:
-- 1800s (30min) timeout per instance (hard kill).
+- 1800s (30min) wall-clock timeout per instance.
 - 50 max steps per agent run.
-- 1024-token input slack: never trim to exact context boundary.
 - ContextLengthError → immediate fail-fast, no blind retries.
-- Patch extracted from SWE-agent trajectory file.
-- Guidance injected via temp JSONL data file with modified problem_statement.
+- Bash commands executed in the repo worktree with 120s per-command cap.
+- Stall detection: 3 consecutive identical commands → abort loop.
 """
 from __future__ import annotations
 
-import json
 import os
+import re
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
-from sweagent_bench.generation.patch_utils import extract_patch_from_trajectory, sanitize_patch_for_preds
-from sweagent_bench.llm.openai_compat import ContextLengthError
+from sweagent_bench.generation.patch_utils import extract_diff, sanitize_patch_for_preds
+from sweagent_bench.llm.openai_compat import ContextLengthError, chat_completion
 
 
 # ── Constants ──────────────────────────────────────────────────
 
 DEFAULT_TIMEOUT_S = 1800      # 30 minutes per instance
-DEFAULT_MAX_STEPS = 50        # SWE-agent max steps
-INPUT_SLACK_TOKENS = 1024     # Never trim to exact boundary
-DEFAULT_MAX_OUTPUT_TOKENS = 512
+DEFAULT_MAX_STEPS = 50        # agent loop iterations
+INPUT_SLACK_TOKENS = 1024     # never trim to exact boundary
+DEFAULT_MAX_OUTPUT_TOKENS = 512   # single-shot fallback
+AGENT_MAX_TOKENS = 4096           # per-turn budget in the agent loop
+CMD_TIMEOUT_S = 120               # per-command timeout
+STALL_THRESHOLD = 3               # consecutive identical commands → stall
 
 
-def _write_instance_jsonl(instance: dict, dest: Path) -> Path:
-    """Write a single-instance JSONL data file for SWE-agent.
+# ── Agent prompts ─────────────────────────────────────────────
 
-    This is used to inject guidance-enhanced problem statements into
-    SWE-agent, which reads instances from data files rather than accepting
-    inline problem statements via CLI flags.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with dest.open("w", encoding="utf-8") as f:
-        f.write(json.dumps(instance, sort_keys=True, ensure_ascii=False) + "\n")
-    return dest
+AGENT_SYSTEM_PROMPT = """\
+You are an expert software engineer tasked with fixing a bug in a repository.
+You have access to a bash shell in the repo's working directory.
+
+## How to interact
+
+**Run a command:** wrap it in a ```bash block:
+```bash
+grep -rn "some_pattern" src/
+```
+
+**Submit your fix:** when you are confident, output a unified diff in a ```diff block:
+```diff
+diff --git a/path/to/file.py b/path/to/file.py
+--- a/path/to/file.py
++++ b/path/to/file.py
+@@ -10,3 +10,4 @@
+ existing line
+-old line
++new line
++added line
+```
+
+## Rules
+- Explore the codebase first. Read relevant files before making changes.
+- Make minimal, focused changes that fix only the reported issue.
+- Your diff must apply cleanly with `git apply`.
+- Do NOT run interactive commands (editors, pagers, less, vim).
+- If a command produces too much output, use `head`, `tail`, or `grep` to filter.
+- Do NOT modify test files unless the issue specifically asks for test changes.
+"""
+
+AGENT_USER_TEMPLATE = """\
+## Repository
+{repo} @ {commit}
+
+## Issue
+{problem_statement}
+
+## Repository Structure (depth=2)
+```
+{tree}
+```
+{guidance_block}
+Fix this issue. Start by exploring the relevant code, then submit a ```diff block with your patch."""
 
 
-def _build_sweagent_command(
+# ── Agent helpers ─────────────────────────────────────────────
+
+def _build_agent_messages(
     instance: dict,
-    model: str,
-    *,
-    data_path: str | None = None,
-    traj_dir: Path | None = None,
-    max_steps: int = DEFAULT_MAX_STEPS,
-) -> list[str]:
-    """Build the SWE-agent >=0.7 CLI command for one instance.
+    repo_dir: Path,
+    guidance_text: str | None = None,
+) -> list[dict]:
+    """Build the initial system + user messages for the agent loop."""
+    from sweagent_bench.prompting.prompt_builder import _build_tree
 
-    SWE-agent 0.7+ uses a Hydra-based CLI with dot-notation overrides.
-    Key flags:
-      --model.name              Model identifier
-      --model.per_instance_cost_limit  Cost limit (0 = unlimited)
-      --data_path               Path to dataset or JSONL file
-      --instance_filter         Filter by instance_id
-      --traj_dir                Trajectory output directory
-      --actions.apply_patch_locally  Apply patches to local repo copy
-    """
-    cmd = [
-        sys.executable, "-m", "sweagent", "run",
-        "--model.name", model,
-        "--model.per_instance_cost_limit", "0",
-        "--actions.apply_patch_locally", "true",
+    tree = _build_tree(repo_dir, max_depth=2)
+    guidance_block = ""
+    if guidance_text:
+        guidance_block = (
+            f"\n\n# REPO GUIDANCE (AUTO-TUNED)\n"
+            f"{guidance_text}\n"
+            f"# END REPO GUIDANCE"
+        )
+
+    user_content = AGENT_USER_TEMPLATE.format(
+        repo=instance["repo"],
+        commit=instance["base_commit"],
+        problem_statement=instance.get("problem_statement", ""),
+        tree=tree,
+        guidance_block=guidance_block,
+    )
+
+    return [
+        {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
     ]
 
-    # Data source: either a custom JSONL (with guidance injected) or
-    # the default SWE-bench dataset filtered by instance_id.
-    if data_path:
-        cmd.extend(["--data_path", data_path])
-    else:
-        cmd.extend([
-            "--data_path", "princeton-nlp/SWE-bench_Verified",
-            "--instance_filter", instance["instance_id"],
-        ])
 
-    if traj_dir:
-        cmd.extend(["--traj_dir", str(traj_dir)])
+def _parse_fenced_blocks(text: str) -> list[tuple[str, str]]:
+    """Extract fenced code blocks as ``(language, content)`` tuples."""
+    return re.findall(r"```(\w*)\s*\n(.*?)```", text, re.DOTALL)
 
-    return cmd
 
+def _execute_bash(cmd: str, cwd: Path) -> str:
+    """Run a bash command in the worktree and return combined output."""
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", cmd],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=CMD_TIMEOUT_S,
+        )
+        output = ""
+        if proc.stdout:
+            output += proc.stdout
+        if proc.stderr:
+            output += proc.stderr
+        if proc.returncode != 0:
+            output += f"\n[exit code: {proc.returncode}]"
+        # Truncate very long outputs to stay within context budget
+        if len(output) > 10_000:
+            output = output[:5000] + "\n\n... [truncated] ...\n\n" + output[-3000:]
+        return output.strip() or "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"[command timed out after {CMD_TIMEOUT_S}s]"
+    except Exception as e:
+        return f"[error running command: {e}]"
+
+
+def _extract_git_diff(cwd: Path) -> str:
+    """Get uncommitted changes from the worktree via ``git diff``."""
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _run_agent_loop(
+    instance: dict,
+    model: str,
+    repo_dir: Path,
+    *,
+    guidance_text: str | None = None,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    timeout_s: int = DEFAULT_TIMEOUT_S,
+    api_base: str | None = None,
+) -> tuple[str, dict]:
+    """Run the iterative mini-swe-agent loop.
+
+    Returns:
+        ``(patch_string, info_dict)`` where *info_dict* carries
+        ``steps_taken``, ``stall_detected``, ``stall_type``,
+        ``stall_repeat_count``, ``status``, ``error``.
+    """
+    messages = _build_agent_messages(instance, repo_dir, guidance_text)
+
+    info: dict = {
+        "steps_taken": 0,
+        "stall_detected": False,
+        "stall_type": None,
+        "stall_repeat_count": 0,
+        "status": "ok",
+        "error": None,
+    }
+
+    deadline = time.perf_counter() + timeout_s
+    recent_cmds: list[str] = []
+
+    for step in range(max_steps):
+        if time.perf_counter() >= deadline:
+            info["status"] = "timeout"
+            info["error"] = f"Agent timed out after {timeout_s}s at step {step}"
+            break
+
+        info["steps_taken"] = step + 1
+
+        # ── LLM call (env save/restore for api_base) ──
+        prev_base = os.environ.get("OPENAI_BASE_URL")
+        try:
+            if api_base:
+                os.environ["OPENAI_BASE_URL"] = api_base
+
+            remaining = max(30, int(deadline - time.perf_counter()))
+            response_text = chat_completion(
+                model=model,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=AGENT_MAX_TOKENS,
+                timeout_s=min(remaining, 300),
+            )
+        except ContextLengthError as e:
+            info["status"] = "context_length_error"
+            info["error"] = str(e)
+            break
+        except Exception as e:
+            info["status"] = "error"
+            info["error"] = f"LLM call failed at step {step}: {e}"
+            break
+        finally:
+            if api_base:
+                if prev_base is not None:
+                    os.environ["OPENAI_BASE_URL"] = prev_base
+                else:
+                    os.environ.pop("OPENAI_BASE_URL", None)
+
+        # ── Parse response for fenced blocks ──
+        blocks = _parse_fenced_blocks(response_text)
+
+        # Check for ```diff submission
+        for lang, content in blocks:
+            if lang.lower() == "diff" and content.strip():
+                messages.append({"role": "assistant", "content": response_text})
+                return content.strip(), info
+
+        # Check for raw inline diff (model forgot to fence it)
+        bash_langs = {"bash", "sh"}
+        has_bash = any(lang.lower() in bash_langs for lang, _ in blocks)
+        if not has_bash:
+            raw = extract_diff(response_text)
+            if raw and ("diff --git" in raw or "--- a/" in raw):
+                messages.append({"role": "assistant", "content": response_text})
+                return raw, info
+
+        # ── Execute bash blocks ──
+        bash_contents = [
+            content for lang, content in blocks
+            if lang.lower() in bash_langs and content.strip()
+        ]
+
+        if bash_contents:
+            observations: list[str] = []
+            stalled = False
+            for cmd_text in bash_contents:
+                cmd = cmd_text.strip()
+                # Stall detection
+                recent_cmds.append(cmd)
+                if len(recent_cmds) > STALL_THRESHOLD:
+                    recent_cmds = recent_cmds[-STALL_THRESHOLD:]
+                if (
+                    len(recent_cmds) >= STALL_THRESHOLD
+                    and len(set(recent_cmds)) == 1
+                ):
+                    info["stall_detected"] = True
+                    info["stall_type"] = "repeated_command"
+                    info["stall_repeat_count"] = STALL_THRESHOLD
+                    stalled = True
+                    break
+
+                output = _execute_bash(cmd, repo_dir)
+                observations.append(f"$ {cmd}\n{output}")
+
+            if stalled:
+                break
+
+            messages.append({"role": "assistant", "content": response_text})
+            obs_text = "\n\n".join(observations)
+            messages.append({
+                "role": "user",
+                "content": f"## Command Output\n{obs_text}",
+            })
+        else:
+            # Model produced text without actionable blocks — nudge it
+            messages.append({"role": "assistant", "content": response_text})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Please run a ```bash command to explore the code, "
+                    "or submit a ```diff block with your fix."
+                ),
+            })
+
+    # ── Last resort: check git diff for any edits the agent made ──
+    worktree_patch = _extract_git_diff(repo_dir)
+    if worktree_patch:
+        return worktree_patch, info
+
+    return "", info
+
+
+# ── Public API ────────────────────────────────────────────────
 
 def generate_patch_with_sweagent(
     instance: dict,
@@ -98,24 +323,25 @@ def generate_patch_with_sweagent(
     traj_dir: Path | None = None,
     api_base: str | None = None,
 ) -> dict:
-    """Run SWE-agent on one instance and return result metadata.
+    """Run the mini-swe-agent on one instance and return result metadata.
+
+    The function signature and return-dict shape are intentionally kept
+    identical to the old SWE-agent subprocess runner so callers (the
+    orchestrator) need zero changes.
 
     Args:
         instance: SWE-bench instance dict with instance_id, repo,
             base_commit, problem_statement.
-        model: Model name/path for SWE-agent.
-        guidance_text: Optional AGENTS.md guidance to inject into the
-            problem statement. When provided, a temporary single-instance
-            JSONL file is written with the enhanced problem_statement and
-            passed to SWE-agent as --data_path.
-        timeout_s: Hard timeout in seconds (default 1800).
-        max_steps: Maximum agent steps (default 50).
-        traj_dir: Directory for trajectory output.
-        api_base: vLLM/OpenAI API base URL (set as OPENAI_BASE_URL env).
+        model: Model name/path.
+        guidance_text: Optional AGENTS.md guidance to prepend.
+        timeout_s: Wall-clock timeout in seconds (default 1800).
+        max_steps: Maximum agent loop iterations (default 50).
+        traj_dir: (unused, kept for API compat) trajectory directory.
+        api_base: vLLM/OpenAI API base URL.
 
     Returns:
-        Dict with keys: patch, elapsed_s, token_usage, status, error,
-        patch_source, fallback_single_shot_used.
+        Dict with keys: instance_id, patch, elapsed_s, token_usage,
+        status, error, patch_source, fallback_single_shot_used, etc.
     """
     iid = instance["instance_id"]
     start = time.perf_counter()
@@ -139,113 +365,59 @@ def generate_patch_with_sweagent(
         "stall_repeat_count": 0,
     }
 
-    # Set env for API base
-    env = os.environ.copy()
-    if api_base:
-        env["OPENAI_BASE_URL"] = api_base
-    if not env.get("OPENAI_API_KEY"):
-        env["OPENAI_API_KEY"] = "EMPTY"
-
-    traj_dir = traj_dir or Path("artifacts/trajectories")
-    traj_dir.mkdir(parents=True, exist_ok=True)
-
-    # If guidance text is provided, inject it into the problem statement
-    # and write a single-instance JSONL file for SWE-agent to read.
-    # SWE-agent does not accept inline problem statements via CLI flags,
-    # so we create a custom data file with the modified instance.
-    data_path: str | None = None
-    if guidance_text:
-        enhanced_instance = dict(instance)
-        problem_statement = instance.get("problem_statement", "")
-        enhanced_instance["problem_statement"] = (
-            f"{problem_statement}\n\n"
-            f"# REPO GUIDANCE (AUTO-TUNED)\n"
-            f"{guidance_text}\n"
-            f"# END REPO GUIDANCE"
-        )
-        instance_file = traj_dir / f"{iid}_instance.jsonl"
-        _write_instance_jsonl(enhanced_instance, instance_file)
-        data_path = str(instance_file)
-
-    cmd = _build_sweagent_command(
-        instance, model,
-        data_path=data_path,
-        traj_dir=traj_dir,
-        max_steps=max_steps,
-    )
-
+    # ── Checkout repo ──
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            env=env,
-        )
-
-        if proc.returncode != 0:
-            print(f"  [sweagent] {iid} exit code {proc.returncode}", file=sys.stderr)
-            stderr_tail = proc.stderr[-500:] if proc.stderr else ""
-
-            # Check for ContextLengthError in stderr
-            if any(marker in stderr_tail.lower() for marker in (
-                "context_length", "maximum context length", "contextlengtherror",
-            )):
-                result["status"] = "context_length_error"
-                result["error"] = f"Context length exceeded: {stderr_tail[-200:]}"
-                result["elapsed_s"] = time.perf_counter() - start
-                return result
-
-            result["status"] = "error"
-            result["error"] = f"SWE-agent exit code {proc.returncode}: {stderr_tail}"
-
-    except subprocess.TimeoutExpired:
-        result["status"] = "timeout"
-        result["error"] = f"SWE-agent timed out after {timeout_s}s"
-        result["elapsed_s"] = time.perf_counter() - start
-        return result
+        from sweagent_bench.git.checkout import checkout_repo
+        repo_dir = checkout_repo(instance["repo"], instance["base_commit"])
     except Exception as exc:
         result["status"] = "error"
-        result["error"] = str(exc)
+        result["error"] = f"Checkout failed: {exc}"
         result["elapsed_s"] = time.perf_counter() - start
         return result
 
-    # Extract patch from trajectory
-    traj_patterns = [
-        traj_dir / f"{iid}.json",
-        traj_dir / iid / "trajectory.json",
-        traj_dir / f"{iid}.traj",
-    ]
-    patch = ""
-    for traj_path in traj_patterns:
-        if traj_path.exists():
-            patch = extract_patch_from_trajectory(str(traj_path))
-            if patch:
-                result["patch_source"] = "container"
-                break
+    # ── Agent loop ──
+    try:
+        patch, loop_info = _run_agent_loop(
+            instance,
+            model,
+            repo_dir,
+            guidance_text=guidance_text,
+            max_steps=max_steps,
+            timeout_s=timeout_s,
+            api_base=api_base,
+        )
+    except Exception as exc:
+        patch = ""
+        loop_info = {
+            "status": "error", "error": str(exc),
+            "stall_detected": False, "stall_type": None, "stall_repeat_count": 0,
+        }
 
-    # If no patch from trajectory, try SWE-agent's standard output
-    if not patch and proc.stdout:
-        from sweagent_bench.generation.patch_utils import extract_diff
-        patch = extract_diff(proc.stdout)
-        if patch:
-            result["patch_source"] = "model"
+    # Propagate loop metadata
+    result["status"] = loop_info.get("status", "ok")
+    result["error"] = loop_info.get("error")
+    result["stall_detected"] = loop_info.get("stall_detected", False)
+    result["stall_type"] = loop_info.get("stall_type")
+    result["stall_repeat_count"] = loop_info.get("stall_repeat_count", 0)
 
-    # Fallback to single-shot if SWE-agent produced no patch
+    if patch:
+        result["patch"] = patch
+        result["patch_source"] = "agent_loop"
+
+    # ── Fallback to single-shot if agent produced no patch ──
     if not patch:
         try:
             patch = _fallback_single_shot(instance, model, guidance_text, api_base)
             if patch:
+                result["patch"] = patch
                 result["fallback_single_shot_used"] = True
                 result["fallback_single_shot_patch_len"] = len(patch)
-                result["fallback_reason"] = "sweagent_empty_patch"
+                result["fallback_reason"] = "agent_empty_patch"
                 result["patch_source"] = "fallback_single_shot"
         except ContextLengthError:
             result["fallback_reason"] = "context_length_error_in_fallback"
 
-    result["patch"] = patch
     result["elapsed_s"] = time.perf_counter() - start
-
     return result
 
 
