@@ -1,0 +1,21 @@
+# Core agent
+sweagent>=0.7
+
+# SWE-bench harness (eval-time only)
+swebench>=2.0.0
+
+# HTTP client for OpenAI-compatible inference
+requests>=2.31.0
+
+# HuggingFace datasets for loading SWE-bench instances
+datasets>=2.14.0
+
+# Docker SDK for programmatic container control
+docker>=6.0.0
+
+# Tree-sitter for deterministic static analysis probes
+tree-sitter>=0.23
+tree-sitter-python>=0.23
+
+# vLLM (serve-side only; not needed on eval nodes)
+# vllm

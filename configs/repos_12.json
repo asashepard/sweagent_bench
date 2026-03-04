@@ -1,0 +1,14 @@
+[
+  {"repo": "django/django", "commit": "HEAD", "tasks_file": "artifacts/tasks/django__django/train.jsonl"},
+  {"repo": "astropy/astropy", "commit": "HEAD", "tasks_file": "artifacts/tasks/astropy__astropy/train.jsonl"},
+  {"repo": "sympy/sympy", "commit": "HEAD", "tasks_file": "artifacts/tasks/sympy__sympy/train.jsonl"},
+  {"repo": "scikit-learn/scikit-learn", "commit": "HEAD", "tasks_file": "artifacts/tasks/scikit-learn__scikit-learn/train.jsonl"},
+  {"repo": "matplotlib/matplotlib", "commit": "HEAD", "tasks_file": "artifacts/tasks/matplotlib__matplotlib/train.jsonl"},
+  {"repo": "pallets/flask", "commit": "HEAD", "tasks_file": "artifacts/tasks/pallets__flask/train.jsonl"},
+  {"repo": "sphinx-doc/sphinx", "commit": "HEAD", "tasks_file": "artifacts/tasks/sphinx-doc__sphinx/train.jsonl"},
+  {"repo": "pylint-dev/pylint", "commit": "HEAD", "tasks_file": "artifacts/tasks/pylint-dev__pylint/train.jsonl"},
+  {"repo": "pytest-dev/pytest", "commit": "HEAD", "tasks_file": "artifacts/tasks/pytest-dev__pytest/train.jsonl"},
+  {"repo": "psf/requests", "commit": "HEAD", "tasks_file": "artifacts/tasks/psf__requests/train.jsonl"},
+  {"repo": "pydata/xarray", "commit": "HEAD", "tasks_file": "artifacts/tasks/pydata__xarray/train.jsonl"},
+  {"repo": "mwaskom/seaborn", "commit": "HEAD", "tasks_file": "artifacts/tasks/mwaskom__seaborn/train.jsonl"}
+]

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sweagent-bench"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "sweagent>=0.7",
+    "swebench>=2.0.0",
+    "requests>=2.31.0",
+    "datasets>=2.14.0",
+    "docker>=6.0.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sweagent_bench*"]

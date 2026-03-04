@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RepoGuidance",
+  "description": "Per-repo guidance block for tuning experiments.",
+  "type": "object",
+  "required": ["repo", "commit", "lines", "version", "char_budget"],
+  "properties": {
+    "repo": {
+      "type": "string",
+      "description": "Repository in owner/name format."
+    },
+    "commit": {
+      "type": "string",
+      "description": "Base commit SHA."
+    },
+    "lines": {
+      "type": "array",
+      "description": "Guidance text lines (each typically starts with '- ').",
+      "items": {
+        "type": "string"
+      }
+    },
+    "version": {
+      "type": "integer",
+      "description": "Monotonically increasing version number.",
+      "minimum": 0
+    },
+    "char_budget": {
+      "type": "integer",
+      "description": "Maximum characters for the rendered guidance text.",
+      "default": 3200
+    }
+  }
+}

@@ -1,0 +1,5 @@
+# Verified smoke set (4 IDs), subset of verified_mini_ids.txt
+astropy__astropy-12907
+astropy__astropy-13033
+django__django-10097
+django__django-10554

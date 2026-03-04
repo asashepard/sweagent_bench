@@ -1,0 +1,6 @@
+# Four candidate instances for quick pass/fail sanity checks.
+# Chosen from existing repo smoke/docs so they are easy to run repeatedly.
+django__django-16379
+django__django-10097
+django__django-10554
+astropy__astropy-12907
