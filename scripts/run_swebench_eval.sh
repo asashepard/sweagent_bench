@@ -39,7 +39,7 @@ python -m swebench.harness.run_evaluation \
     --predictions_path "$PREDS_PATH" \
     --max_workers "$MAX_WORKERS" \
     --run_id "$RUN_ID" \
-    --output_dir "$RESULTS_DIR" \
+    --report_dir "$RESULTS_DIR" \
     > >(tee "$RESULTS_DIR/stdout.log") \
     2> >(tee "$RESULTS_DIR/stderr.log" >&2)
 EXIT_CODE=$?

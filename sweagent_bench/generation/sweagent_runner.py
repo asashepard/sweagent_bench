@@ -13,9 +13,17 @@ Key design decisions:
 - ContextLengthError → immediate fail-fast, no blind retries.
 - Bash commands executed in the repo worktree with 120s per-command cap.
 - Stall detection: 3 consecutive identical commands → abort loop.
+
+Debug artifacts:
+  Set SWEAGENT_BENCH_DEBUG=1 to write per-instance debug files under
+  results/<experiment_id>/debug/<condition>/<instance_id>/:
+    assistant_step_<n>.txt  — raw model response for each step
+    bash_step_<n>.txt       — commands + stdout/stderr
+    extraction_summary.txt  — extraction decisions
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -89,6 +97,27 @@ Fix this issue. Start by exploring the relevant code, then submit a ```diff bloc
 
 # ── Agent helpers ─────────────────────────────────────────────
 
+def _is_debug() -> bool:
+    """Return True when SWEAGENT_BENCH_DEBUG=1 is set."""
+    return os.environ.get("SWEAGENT_BENCH_DEBUG", "") == "1"
+
+
+def _debug_write(debug_dir: Path | None, filename: str, content: str) -> None:
+    """Write a debug artifact file (no-op when *debug_dir* is None)."""
+    if debug_dir is None:
+        return
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        (debug_dir / filename).write_text(content, encoding="utf-8")
+    except Exception:
+        pass  # never let debug I/O crash the pipeline
+
+
+def _strip_think_markers(text: str) -> str:
+    """Remove literal ``<think>`` / ``</think>`` markers, keep content."""
+    return text.replace("<think>", "").replace("</think>", "")
+
+
 def _build_agent_messages(
     instance: dict,
     repo_dir: Path,
@@ -121,8 +150,47 @@ def _build_agent_messages(
 
 
 def _parse_fenced_blocks(text: str) -> list[tuple[str, str]]:
-    """Extract fenced code blocks as ``(language, content)`` tuples."""
+    """Extract fenced code blocks as ``(language, content)`` tuples.
+
+    Handles ``diff``, ``patch``, ``bash``, ``sh``, and untagged fences.
+    """
     return re.findall(r"```(\w*)\s*\n(.*?)```", text, re.DOTALL)
+
+
+_DIFF_FENCE_LANGS = {"diff", "patch"}
+_BASH_FENCE_LANGS = {"bash", "sh"}
+
+
+def _extract_last_diff_block(text: str) -> str:
+    """Extract the **last** diff block from model output.
+
+    Checks in order:
+    1. Fenced blocks tagged ``diff`` or ``patch`` — last one wins.
+    2. Raw unfenced ``diff --git`` header — last occurrence wins.
+    3. ``extract_diff()`` fallback for ``---`` headers.
+    """
+    blocks = _parse_fenced_blocks(text)
+
+    # Collect all diff/patch fenced blocks
+    diff_blocks = [
+        content.strip()
+        for lang, content in blocks
+        if lang.lower() in _DIFF_FENCE_LANGS and content.strip()
+    ]
+    if diff_blocks:
+        return diff_blocks[-1]  # last one wins
+
+    # Raw unfenced: find last "diff --git" line
+    lines = text.split("\n")
+    last_start = None
+    for i, line in enumerate(lines):
+        if line.startswith("diff --git "):
+            last_start = i
+    if last_start is not None:
+        return "\n".join(lines[last_start:]).strip()
+
+    # Final fallback via patch_utils.extract_diff
+    return extract_diff(text)
 
 
 def _execute_bash(cmd: str, cwd: Path) -> str:
@@ -178,6 +246,7 @@ def _run_agent_loop(
     max_steps: int = DEFAULT_MAX_STEPS,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     api_base: str | None = None,
+    debug_dir: Path | None = None,
 ) -> tuple[str, dict]:
     """Run the iterative mini-swe-agent loop.
 
@@ -195,6 +264,8 @@ def _run_agent_loop(
         "stall_repeat_count": 0,
         "status": "ok",
         "error": None,
+        "diff_block_found": False,
+        "git_diff_non_empty": False,
     }
 
     deadline = time.perf_counter() + timeout_s
@@ -237,28 +308,29 @@ def _run_agent_loop(
                 else:
                     os.environ.pop("OPENAI_BASE_URL", None)
 
+        # ── Debug: write raw assistant response ──
+        _debug_write(debug_dir, f"assistant_step_{step}.txt", response_text)
+
+        # ── Pre-process: strip <think>/</ think> markers, keep content ──
+        cleaned = _strip_think_markers(response_text)
+
         # ── Parse response for fenced blocks ──
-        blocks = _parse_fenced_blocks(response_text)
+        blocks = _parse_fenced_blocks(cleaned)
 
-        # Check for ```diff submission
-        for lang, content in blocks:
-            if lang.lower() == "diff" and content.strip():
-                messages.append({"role": "assistant", "content": response_text})
-                return content.strip(), info
+        # Check for diff/patch submission (last block wins)
+        diff_candidate = _extract_last_diff_block(cleaned)
+        has_bash = any(lang.lower() in _BASH_FENCE_LANGS for lang, _ in blocks)
 
-        # Check for raw inline diff (model forgot to fence it)
-        bash_langs = {"bash", "sh"}
-        has_bash = any(lang.lower() in bash_langs for lang, _ in blocks)
-        if not has_bash:
-            raw = extract_diff(response_text)
-            if raw and ("diff --git" in raw or "--- a/" in raw):
-                messages.append({"role": "assistant", "content": response_text})
-                return raw, info
+        if diff_candidate and ("diff --git" in diff_candidate or "--- " in diff_candidate):
+            info["diff_block_found"] = True
+            messages.append({"role": "assistant", "content": response_text})
+            _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", diff_candidate)
+            return diff_candidate, info
 
         # ── Execute bash blocks ──
         bash_contents = [
             content for lang, content in blocks
-            if lang.lower() in bash_langs and content.strip()
+            if lang.lower() in _BASH_FENCE_LANGS and content.strip()
         ]
 
         if bash_contents:
@@ -283,6 +355,13 @@ def _run_agent_loop(
                 output = _execute_bash(cmd, repo_dir)
                 observations.append(f"$ {cmd}\n{output}")
 
+            # Debug: write bash commands + outputs
+            _debug_write(
+                debug_dir,
+                f"bash_step_{step}.txt",
+                "\n\n".join(observations),
+            )
+
             if stalled:
                 break
 
@@ -293,6 +372,15 @@ def _run_agent_loop(
                 "content": f"## Command Output\n{obs_text}",
             })
         else:
+            # No bash and no diff — check for raw unfenced diff one more time
+            if not has_bash:
+                raw = extract_diff(cleaned)
+                if raw and ("diff --git" in raw or "--- a/" in raw):
+                    info["diff_block_found"] = True
+                    messages.append({"role": "assistant", "content": response_text})
+                    _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", raw)
+                    return raw, info
+
             # Model produced text without actionable blocks — nudge it
             messages.append({"role": "assistant", "content": response_text})
             messages.append({
@@ -306,6 +394,8 @@ def _run_agent_loop(
     # ── Last resort: check git diff for any edits the agent made ──
     worktree_patch = _extract_git_diff(repo_dir)
     if worktree_patch:
+        info["git_diff_non_empty"] = True
+        _debug_write(debug_dir, "git_diff_fallback.txt", worktree_patch)
         return worktree_patch, info
 
     return "", info
@@ -336,7 +426,7 @@ def generate_patch_with_sweagent(
         guidance_text: Optional AGENTS.md guidance to prepend.
         timeout_s: Wall-clock timeout in seconds (default 1800).
         max_steps: Maximum agent loop iterations (default 50).
-        traj_dir: (unused, kept for API compat) trajectory directory.
+        traj_dir: Directory for debug artifacts (reused for compat).
         api_base: vLLM/OpenAI API base URL.
 
     Returns:
@@ -365,6 +455,14 @@ def generate_patch_with_sweagent(
         "stall_repeat_count": 0,
     }
 
+    # ── Debug directory (opt-in via SWEAGENT_BENCH_DEBUG=1) ──
+    debug_dir: Path | None = None
+    if _is_debug() and traj_dir is not None:
+        # traj_dir is typically: artifacts/preds/<exp>/<condition>/trajectories
+        # we go up two levels to get the experiment root, then use debug/ subdir
+        debug_dir = traj_dir.parent.parent.parent / "debug" / traj_dir.parent.name / iid
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
     # ── Checkout repo ──
     try:
         from sweagent_bench.git.checkout import checkout_repo
@@ -385,6 +483,7 @@ def generate_patch_with_sweagent(
             max_steps=max_steps,
             timeout_s=timeout_s,
             api_base=api_base,
+            debug_dir=debug_dir,
         )
     except Exception as exc:
         patch = ""
@@ -418,6 +517,21 @@ def generate_patch_with_sweagent(
             result["fallback_reason"] = "context_length_error_in_fallback"
 
     result["elapsed_s"] = time.perf_counter() - start
+
+    # ── Debug: extraction summary ──
+    _debug_write(debug_dir, "extraction_summary.txt", (
+        f"instance_id: {iid}\n"
+        f"steps_taken: {loop_info.get('steps_taken', 0)}\n"
+        f"diff_block_found: {loop_info.get('diff_block_found', False)}\n"
+        f"git_diff_non_empty: {loop_info.get('git_diff_non_empty', False)}\n"
+        f"patch_source: {result['patch_source']}\n"
+        f"patch_len_before_sanitation: {len(result['patch'])}\n"
+        f"fallback_single_shot_used: {result['fallback_single_shot_used']}\n"
+        f"status: {result['status']}\n"
+        f"error: {result['error']}\n"
+        f"stall_detected: {result['stall_detected']}\n"
+    ))
+
     return result
 
 

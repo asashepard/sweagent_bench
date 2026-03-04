@@ -9,18 +9,31 @@ MAX_PATCH_SIZE = 200_000
 
 
 def extract_diff(text: str) -> str:
-    fence_pattern = r"```(?:diff)?\s*\n(.*?)```"
+    """Extract a unified diff from *text*.
+
+    Accepts fenced blocks tagged ``diff``, ``patch``, or untagged.
+    When multiple candidate blocks exist the **last** one wins (the model
+    typically refines its answer across turns).
+    """
+    # 1. Fenced blocks: ```diff, ```patch, or plain ```
+    fence_pattern = r"```(?:diff|patch)?\s*\n(.*?)```"
     matches = re.findall(fence_pattern, text, re.DOTALL)
+    # Walk backwards so the *last* qualifying block wins.
     if matches:
-        for match in matches:
+        for match in reversed(matches):
             if "---" in match or "diff --git" in match:
                 return match.strip()
 
+    # 2. Raw unfenced diff starting with "diff --git"
     lines = text.split("\n")
+    last_raw_start = None
     for i, line in enumerate(lines):
         if line.startswith("diff --git "):
-            return "\n".join(lines[i:]).strip()
+            last_raw_start = i
+    if last_raw_start is not None:
+        return "\n".join(lines[last_raw_start:]).strip()
 
+    # 3. Fallback: raw "--- " header
     for i, line in enumerate(lines):
         if line.startswith("--- "):
             return "\n".join(lines[i:]).strip()
