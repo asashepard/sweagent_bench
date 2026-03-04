@@ -25,7 +25,7 @@ from sweagent_bench.datasets.swebench import load_instances, read_instance_ids
 from sweagent_bench.guidance.schema import RepoGuidance
 from sweagent_bench.oracle.loop import run_oracle_loop
 from sweagent_bench.oracle.schema import OracleConfig
-from sweagent_bench.generation.patch_utils import sanitize_patch_for_preds
+from sweagent_bench.generation.patch_utils import normalize_and_validate_patch, sanitize_patch_for_preds
 from sweagent_bench.generation.sweagent_runner import generate_patch_with_sweagent
 from sweagent_bench.utils.jsonl import read_jsonl
 from sweagent_bench.utils.paths import PREDS_DIR, PROJECT_ROOT, RESULTS_DIR
@@ -378,7 +378,8 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                             f"Condition {condition}: iid={iid} runner status={run_meta.get('status')} "
                             f"patch_source={run_meta.get('patch_source')} elapsed={run_meta.get('elapsed_s', 0.0):.2f}s"
                         )
-                        patch = run_meta.get("patch", "")
+                        # Accept either model_patch or patch, preferring model_patch when present.
+                        patch = run_meta.get("model_patch") if "model_patch" in run_meta else run_meta.get("patch", "")
                         _elog(
                             f"Condition {condition}: iid={iid} raw patch length={len(patch)}"
                         )
@@ -390,6 +391,19 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                         _elog(
                             f"Condition {condition}: iid={iid} sanitized patch length={len(patch)} no_op={patch_is_noop}"
                         )
+
+                        # Normalize line endings and validate minimal diff structure
+                        normalized_patch, patch_format_error = normalize_and_validate_patch(patch)
+                        if patch_format_error:
+                            _elog(
+                                f"Condition {condition}: iid={iid} invalid diff format; "
+                                "marking instance as error"
+                            )
+                            patch = ""
+                            run_meta["status"] = "error"
+                            run_meta["error"] = "invalid diff format"
+                        else:
+                            patch = normalized_patch
                 except Exception as exc:
                     print(f"  Eval error {iid}: {exc}", file=sys.stderr)
                     _elog(f"Condition {condition}: iid={iid} exception: {exc}")
@@ -410,7 +424,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                     "model_name_or_path": config.model,
                     "model_patch": patch,
                 }
-                with cond_preds_path.open("a", encoding="utf-8") as f:
+                with cond_preds_path.open("a", encoding="utf-8", newline="\n") as f:
                     f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
                 _elog(f"Condition {condition}: iid={iid} appended preds record")
 
@@ -495,11 +509,25 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         )
 
         resolved = 0
+        unresolved = 0
+        errors = 0
+        completed = 0
+        report_path = None
         load_error = None
         try:
-            from sweagent_bench.evaluation.summarize import compute_rate, load_results
+            from sweagent_bench.evaluation.summarize import compute_rate, load_instance_records, load_results_details
 
-            resolved, _harness_total = load_results(RESULTS_DIR / run_id)
+            details = load_results_details(RESULTS_DIR / run_id)
+            resolved = int(details.get("resolved", 0) or 0)
+            unresolved = int(details.get("unresolved", 0) or 0)
+            errors = int(details.get("errors", 0) or 0)
+            completed = int(details.get("completed", 0) or 0)
+            report_path = details.get("report_path")
+
+            # Propagate harness per-instance outcomes into metrics file when available.
+            eval_instance_records = load_instance_records(RESULTS_DIR / run_id)
+            _merge_eval_outcomes_into_metrics(cond_metrics_path, eval_instance_records)
+
             rate = compute_rate(resolved, expected_total)
             _elog(
                 f"Condition {condition}: evaluation results loaded resolved={resolved} "
@@ -514,6 +542,9 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         eval_results[condition] = {
             "run_id": run_id,
             "resolved": resolved,
+            "unresolved": unresolved,
+            "errors": errors,
+            "completed": completed,
             "total": expected_total,
             "attempted": expected_total,
             "rate": rate,
@@ -521,6 +552,8 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             "instance_metrics_path": str(cond_metrics_path),
             "generation_metrics": generation_metrics,
         }
+        if report_path:
+            eval_results[condition]["harness_report_path"] = report_path
         if load_error is not None:
             eval_results[condition]["error"] = load_error
 
@@ -621,7 +654,9 @@ def _collect_condition_generation_stats(
     for iid in target_ids:
         metric = metrics_by_id.get(iid)
         pred = preds_by_id.get(iid, {})
-        patch_text = pred.get("model_patch", "") if isinstance(pred, dict) else ""
+        patch_text = ""
+        if isinstance(pred, dict):
+            patch_text = pred.get("model_patch") if "model_patch" in pred else pred.get("patch", "")
 
         if metric is not None:
             patch_non_empty_i = bool(metric.get("patch_non_empty"))
@@ -676,3 +711,35 @@ def _collect_condition_generation_stats(
         "mean_elapsed_s": (elapsed_s / attempted) if attempted else 0.0,
         "token_usage": token_usage,
     }
+
+
+def _merge_eval_outcomes_into_metrics(metrics_path: Path, eval_records: list[dict]) -> None:
+    """Merge harness per-instance eval outcomes into metrics jsonl.
+
+    Adds fields to each metrics record when available:
+    - eval_resolved
+    - eval_passed
+    - eval_status
+    - eval_error
+    """
+    if not metrics_path.exists() or not eval_records:
+        return
+
+    eval_by_id: dict[str, dict] = {}
+    for rec in eval_records:
+        iid = rec.get("instance_id")
+        if isinstance(iid, str) and iid:
+            eval_by_id[iid] = rec
+
+    merged_lines: list[str] = []
+    for rec in read_jsonl(metrics_path):
+        iid = rec.get("instance_id")
+        eval_rec = eval_by_id.get(iid) if isinstance(iid, str) else None
+        if eval_rec is not None:
+            rec["eval_resolved"] = bool(eval_rec.get("resolved", False))
+            rec["eval_passed"] = bool(eval_rec.get("passed", False))
+            rec["eval_status"] = eval_rec.get("status")
+            rec["eval_error"] = eval_rec.get("error") or eval_rec.get("error_message")
+        merged_lines.append(json.dumps(rec, sort_keys=True, ensure_ascii=False))
+
+    metrics_path.write_text("\n".join(merged_lines) + "\n", encoding="utf-8", newline="\n")

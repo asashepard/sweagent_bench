@@ -8,6 +8,50 @@ from collections import Counter
 MAX_PATCH_SIZE = 200_000
 
 
+def normalize_patch_text(patch: str) -> str:
+    """Normalize patch text for stable application by the evaluator.
+
+    - Convert CRLF/CR to LF
+    - Ensure non-empty patch ends with exactly one trailing newline
+    """
+    if not patch:
+        return ""
+    normalized = patch.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.strip():
+        return ""
+    return normalized.rstrip("\n") + "\n"
+
+
+def validate_diff_format(patch: str) -> tuple[bool, str | None]:
+    """Validate that patch looks like a minimally valid unified diff.
+
+    Requirements for non-empty patch:
+    - contains file headers (--- a/ and +++ b/)
+    - contains at least one hunk header (@@ ... @@)
+    """
+    if not patch or not patch.strip():
+        return True, None
+
+    has_file_headers = bool(
+        re.search(r"(?m)^---\s+a/", patch) and re.search(r"(?m)^\+\+\+\s+b/", patch)
+    )
+    has_hunk = bool(re.search(r"(?m)^@@\s+.*\s+@@", patch))
+
+    if not has_file_headers or not has_hunk:
+        return False, "invalid diff format"
+
+    return True, None
+
+
+def normalize_and_validate_patch(patch: str) -> tuple[str, str | None]:
+    """Normalize patch and return an error if diff format is invalid."""
+    normalized = normalize_patch_text(patch)
+    ok, err = validate_diff_format(normalized)
+    if not ok:
+        return "", err
+    return normalized, None
+
+
 def extract_diff(text: str) -> str:
     """Extract a unified diff from *text*.
 
