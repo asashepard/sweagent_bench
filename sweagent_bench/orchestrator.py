@@ -240,9 +240,13 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 output_dir=out_dir,
             )
             kb, best = run_oracle_loop(oc)
+            kb_sections = sum(
+                1 for section in (kb.architecture, kb.symbol_map, kb.context, kb.conventions)
+                if section
+            )
             _elog(
                 f"Repo {repo}: oracle loop complete in {time.perf_counter() - t_repo:.2f}s "
-                f"(kb_entries={len(kb.entries)}, best_version={best.version})"
+                f"(kb_sections={kb_sections}, kb_chars={len(kb.render())}, best_version={best.version})"
             )
 
             v0_path = Path(out_dir) / "versions" / "v0.json"
