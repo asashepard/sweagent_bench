@@ -42,9 +42,10 @@ DEFAULT_TIMEOUT_S = 1800      # 30 minutes per instance
 DEFAULT_MAX_STEPS = 50        # agent loop iterations
 INPUT_SLACK_TOKENS = 1024     # never trim to exact boundary
 DEFAULT_MAX_OUTPUT_TOKENS = 512   # single-shot fallback
-AGENT_MAX_TOKENS = 4096           # per-turn budget in the agent loop
+AGENT_MAX_TOKENS = 2048           # per-turn budget in the agent loop
 CMD_TIMEOUT_S = 120               # per-command timeout
 STALL_THRESHOLD = 3               # consecutive identical commands → stall
+PER_COMMAND_OBS_CAP = 4000        # per-command observation cap for message appends
 
 
 def _rlog(msg: str) -> None:
@@ -124,6 +125,78 @@ def _strip_think_markers(text: str) -> str:
     return text.replace("<think>", "").replace("</think>", "")
 
 
+def _truncate_head_tail(text: str, max_len: int, head: int, tail: int) -> str:
+    """Truncate text by keeping head+tail with an explicit middle marker."""
+    if len(text) <= max_len:
+        return text
+    return text[:head] + "\n\n... [truncated] ...\n\n" + text[-tail:]
+
+
+def _trim_messages(messages: list[dict], max_turns: int = 8) -> list[dict]:
+    """Keep system + initial task statement + latest conversation turns.
+
+    Policy:
+    - Preserve first system message if present.
+    - Preserve first user message after system (task statement).
+    - Keep only latest ``max_turns * 2`` remaining user/assistant messages.
+    """
+    if not messages:
+        return messages
+
+    first_system = None
+    rest_after_system: list[dict]
+    if messages and messages[0].get("role") == "system":
+        first_system = messages[0]
+        rest_after_system = messages[1:]
+    else:
+        rest_after_system = messages[:]
+
+    task_message = None
+    remainder: list[dict]
+    if rest_after_system and rest_after_system[0].get("role") == "user":
+        task_message = rest_after_system[0]
+        remainder = rest_after_system[1:]
+    else:
+        remainder = rest_after_system
+
+    max_tail_messages = max(0, max_turns * 2)
+    tail = remainder[-max_tail_messages:] if max_tail_messages else []
+
+    trimmed: list[dict] = []
+    if first_system is not None:
+        trimmed.append(first_system)
+    if task_message is not None:
+        trimmed.append(task_message)
+    trimmed.extend(tail)
+    return trimmed
+
+
+def _get_agent_max_tokens() -> int:
+    """Get per-step completion budget from env, defaulting to 2048."""
+    raw = os.environ.get("SWEAGENT_MAX_TOKENS", "").strip()
+    if not raw:
+        return AGENT_MAX_TOKENS
+    try:
+        val = int(raw)
+        if val > 0:
+            return val
+    except ValueError:
+        pass
+    return AGENT_MAX_TOKENS
+
+
+def _is_install_blocked_command(cmd: str) -> bool:
+    """Return True if command should be blocked unless install override is enabled."""
+    if os.environ.get("SWEAGENT_ALLOW_INSTALL", "") == "1":
+        return False
+    norm = cmd.strip().lower()
+    if norm.startswith("pip install"):
+        return True
+    if norm.startswith("python setup.py"):
+        return True
+    return False
+
+
 def _build_agent_messages(
     instance: dict,
     repo_dir: Path,
@@ -201,6 +274,13 @@ def _extract_last_diff_block(text: str) -> str:
 
 def _execute_bash(cmd: str, cwd: Path) -> str:
     """Run a bash command in the worktree and return combined output."""
+    if _is_install_blocked_command(cmd):
+        return (
+            "[blocked command] Installation commands are disabled in this loop "
+            "(pip install / python setup.py). Proceed without installing packages. "
+            "Set SWEAGENT_ALLOW_INSTALL=1 to allow installs."
+        )
+
     try:
         proc = subprocess.run(
             ["bash", "-c", cmd],
@@ -218,7 +298,7 @@ def _execute_bash(cmd: str, cwd: Path) -> str:
             output += f"\n[exit code: {proc.returncode}]"
         # Truncate very long outputs to stay within context budget
         if len(output) > 10_000:
-            output = output[:5000] + "\n\n... [truncated] ...\n\n" + output[-3000:]
+            output = _truncate_head_tail(output, max_len=10_000, head=5000, tail=3000)
         return output.strip() or "(no output)"
     except subprocess.TimeoutExpired:
         return f"[command timed out after {CMD_TIMEOUT_S}s]"
@@ -300,16 +380,18 @@ def _run_agent_loop(
 
             remaining = max(30, int(deadline - time.perf_counter()))
             t_llm = time.perf_counter()
+            messages = _trim_messages(messages, max_turns=8)
+            max_tokens = _get_agent_max_tokens()
             response_text = chat_completion(
                 model=model,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=AGENT_MAX_TOKENS,
+                max_tokens=max_tokens,
                 timeout_s=min(remaining, 300),
             )
             _rlog(
                 f"Step {step+1}: LLM response received in {time.perf_counter() - t_llm:.2f}s "
-                f"chars={len(response_text)}"
+                f"chars={len(response_text)} max_tokens={max_tokens}"
             )
         except ContextLengthError as e:
             info["status"] = "context_length_error"
@@ -384,11 +466,17 @@ def _run_agent_loop(
                 _rlog(f"Step {step+1}: running command: {cmd}")
                 t_cmd = time.perf_counter()
                 output = _execute_bash(cmd, repo_dir)
+                output_for_observation = _truncate_head_tail(
+                    output,
+                    max_len=PER_COMMAND_OBS_CAP,
+                    head=2000,
+                    tail=2000,
+                )
                 _rlog(
                     f"Step {step+1}: command done in {time.perf_counter() - t_cmd:.2f}s "
-                    f"output_chars={len(output)}"
+                    f"output_chars={len(output)} obs_chars={len(output_for_observation)}"
                 )
-                observations.append(f"$ {cmd}\n{output}")
+                observations.append(f"$ {cmd}\n{output_for_observation}")
 
             # Debug: write bash commands + outputs
             _debug_write(
@@ -427,10 +515,7 @@ def _run_agent_loop(
             messages.append({"role": "assistant", "content": response_text})
             messages.append({
                 "role": "user",
-                "content": (
-                    "Please run a ```bash command to explore the code, "
-                    "or submit a ```diff block with your fix."
-                ),
+                "content": "Next response MUST contain either exactly one bash block OR exactly one diff/patch block. No other text.",
             })
             _rlog(
                 f"Step {step+1}: no actionable block found; nudged model "
