@@ -21,6 +21,11 @@ Rules:
 - "modify" → replace or rephrase the closest matching rule in that section.
 - "strengthen" → make an existing rule more specific/forceful.
 - "remove" → delete the matching rule from that section.
+- Also resolve direct conflicts with existing guidance:
+    - If an old rule directly contradicts a newly edited rule, keep the newly edited rule and remove the conflicting old rule.
+    - If an old rule is a weaker duplicate of a newly strengthened rule, keep only the stronger/newer phrasing.
+    - Do not invent unrelated new rules while resolving conflicts.
+    - Keep conflict cleanup local to touched sections when possible.
 - Keep the final AGENTS.md under {char_budget} characters.
 - Preserve the overall structure and formatting.
 - Output ONLY the updated AGENTS.md. No commentary."""
@@ -57,8 +62,24 @@ def apply_edits(
     result = raw.strip()
     result = re.sub(r"^```(?:markdown)?\s*", "", result)
     result = re.sub(r"\s*```$", "", result)
+    result = _remove_exact_duplicate_bullets(result)
 
     if len(result) > AGENTS_MD_CHAR_BUDGET:
         result = result[:AGENTS_MD_CHAR_BUDGET - 20] + "\n\n[... truncated]"
 
     return result
+
+
+def _remove_exact_duplicate_bullets(agents_md: str) -> str:
+    """Remove exact duplicate bullet lines while preserving order/format."""
+    out_lines: list[str] = []
+    seen_bullets: set[str] = set()
+    for line in agents_md.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            normalized = " ".join(stripped.split())
+            if normalized in seen_bullets:
+                continue
+            seen_bullets.add(normalized)
+        out_lines.append(line)
+    return "\n".join(out_lines)

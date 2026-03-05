@@ -25,10 +25,16 @@ Return ONLY a JSON array of probe objects with this shape:
 ]
 
 Rules:
-- Generate diverse probes (architecture, testing, code navigation, change safety).
-- Prefer concrete repo-aware tasks over generic style prompts.
+- Generate diverse probes (bug fixing, test failures, code navigation, change safety).
+- Each probe task must look like a realistic coding-task request from an engineer,
+  similar to SWE-bench issue statements.
+- Prefer concrete repo-aware bug scenarios over generic style/meta prompts.
+- Avoid asking the assistant to explain AGENTS.md itself.
+- Favor tasks that require code investigation, targeted edits, and validation.
 - Avoid duplicates with prior probe tasks.
 - Provide 2-4 expected behaviors per probe.
+- Expected behaviors should evaluate practical coding performance (finding relevant files,
+  proposing minimal safe edits, selecting tests/validation), not writing style commentary.
 - Maximum {max_probes} probes.
 """
 
@@ -48,7 +54,13 @@ REPO KB SNIPPET:
 PRIOR PROBE TASKS (avoid duplicates):
 {prior_tasks}
 
-Generate probes now."""
+Generate probes now.
+
+Additional requirements for this batch:
+- Write each task as a concrete coding request (e.g., fix a regression, resolve a failing test,
+  patch a specific behavior bug), not as a guidance/meta question.
+- Include realistic technical context in the task (module/function/test hints) when possible.
+- Do not ask for broad refactors; prefer scoped, actionable bug-fix tasks."""
 
 
 def _make_probe_id(task: str) -> str:
