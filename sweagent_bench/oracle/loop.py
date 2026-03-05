@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sweagent_bench.git.checkout import checkout_repo
 from sweagent_bench.guidance.schema import RepoGuidance
-from sweagent_bench.kb.agents_md import render_agents_md
+from sweagent_bench.kb.agents_md import AGENTS_MD_CHAR_BUDGET, render_agents_md
 from sweagent_bench.kb.builder import build_kb
 from sweagent_bench.kb.schema import RepoKB
 from sweagent_bench.oracle.apply import apply_edits
@@ -17,6 +18,11 @@ from sweagent_bench.oracle.judge import evaluate_probe
 from sweagent_bench.oracle.probes import generate_probes
 from sweagent_bench.oracle.schema import Edit, OracleConfig, OracleState, Probe, ProbeResult
 from sweagent_bench.probes import run_all_probes
+
+
+MAX_EDITS_PER_ITERATION = 8
+RESERVED_CHAR_BUFFER = 640
+SOFT_CHAR_BUDGET = AGENTS_MD_CHAR_BUDGET - RESERVED_CHAR_BUFFER
 
 
 def _olog(msg: str) -> None:
@@ -131,8 +137,19 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         )
         direct_edits = _collect_edits_from_results(results)
         _olog(f"Iteration {t}: direct edits from probes={len(direct_edits)}")
-        edits = _dedupe_edits([*direct_edits, *llm_edits])
-        _olog(f"Iteration {t}: deduped edits={len(edits)}")
+        raw_edits = [*direct_edits, *llm_edits]
+        deduped_edits = _dedupe_edits(raw_edits)
+        _olog(f"Iteration {t}: deduped edits={len(deduped_edits)}")
+        edits = _prioritize_edits_for_iteration(
+            raw_edits=raw_edits,
+            deduped_edits=deduped_edits,
+            current_agents_md=agents_md,
+            max_edits=MAX_EDITS_PER_ITERATION,
+        )
+        _olog(
+            f"Iteration {t}: prioritized edits={len(edits)} "
+            f"(cap={MAX_EDITS_PER_ITERATION}, soft_budget={SOFT_CHAR_BUDGET})"
+        )
         if edits:
             for idx, edit in enumerate(edits, start=1):
                 _olog(f"Iteration {t}: edit {idx}/{len(edits)} -> {_summarize_edit(edit)}")
@@ -227,6 +244,98 @@ def _dedupe_edits(edits: list[Edit]) -> list[Edit]:
         seen.add(key)
         out.append(Edit(section=key[0] or "General", action=key[1] or "add", content=key[2]))
     return out
+
+
+def _prioritize_edits_for_iteration(
+    *,
+    raw_edits: list[Edit],
+    deduped_edits: list[Edit],
+    current_agents_md: str,
+    max_edits: int,
+) -> list[Edit]:
+    if not deduped_edits:
+        return []
+
+    action_weight = {
+        "modify": 4,
+        "strengthen": 3,
+        "remove": 2,
+        "add": 1,
+    }
+
+    freq_by_key: dict[tuple[str, str, str], int] = {}
+    for edit in raw_edits:
+        key = _edit_key(edit)
+        freq_by_key[key] = freq_by_key.get(key, 0) + 1
+
+    at_or_over_soft_budget = len(current_agents_md) >= SOFT_CHAR_BUDGET
+    selected: list[Edit] = []
+    seen_intents: set[str] = set()
+
+    ranked = sorted(
+        deduped_edits,
+        key=lambda e: (
+            freq_by_key.get(_edit_key(e), 1),
+            action_weight.get(e.action.strip().lower(), 0),
+            -len(e.content),
+        ),
+        reverse=True,
+    )
+
+    for edit in ranked:
+        action = edit.action.strip().lower()
+        intent = _intent_key(edit.content)
+
+        if intent and intent in seen_intents:
+            continue
+
+        if _looks_overly_instance_specific(edit):
+            continue
+
+        if at_or_over_soft_budget and action == "add":
+            continue
+
+        selected.append(edit)
+        if intent:
+            seen_intents.add(intent)
+        if len(selected) >= max_edits:
+            break
+
+    return selected
+
+
+def _edit_key(edit: Edit) -> tuple[str, str, str]:
+    return (
+        edit.section.strip().lower(),
+        edit.action.strip().lower(),
+        " ".join(edit.content.strip().split()).lower(),
+    )
+
+
+def _intent_key(text: str) -> str:
+    norm = text.lower()
+    norm = re.sub(r"`[^`]+`", "", norm)
+    norm = re.sub(r"[a-zA-Z0-9_./-]+\.py", "", norm)
+    norm = re.sub(r"\b(pytest|tox|grep|rg|python manage\.py|python -m pytest)\b", "", norm)
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return " ".join(norm.split()[:18])
+
+
+def _looks_overly_instance_specific(edit: Edit) -> bool:
+    content = edit.content.strip()
+    lower = content.lower()
+
+    path_like = len(re.findall(r"\b[\w./-]+\.(?:py|txt|md|json|yaml|yml|ini|cfg)\b", content))
+    command_like = bool(re.search(r"\b(pytest|python manage\.py|grep|rg|tox|head\s+-\d+)\b", lower))
+    code_block_like = "```" in content or "def " in content or "class " in content
+
+    if code_block_like:
+        return True
+    if command_like and edit.action.strip().lower() == "add":
+        return True
+    if path_like >= 2 and edit.action.strip().lower() == "add":
+        return True
+    return False
 
 
 def _save_probe_results_summary(probe_results, path: Path) -> None:

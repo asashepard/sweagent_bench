@@ -43,6 +43,9 @@ Rules:
 - If behavior is already strong enough, return an empty "proposed_edits": [].
 - If behavior has multiple independent gaps, propose multiple edits.
 - Only propose edits you are confident will materially improve future behavior.
+- Prefer "modify"/"strengthen" over many new "add" rules.
+- Keep edits reusable and repo-level; avoid one-off file-path or one-off command prescriptions.
+- Return at most 3 proposed edits per probe.
 - Do NOT force edits just to fill the list.
 - Output ONLY valid JSON."""
 
