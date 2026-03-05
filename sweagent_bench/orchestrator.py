@@ -41,6 +41,15 @@ def _elog(msg: str) -> None:
     print(f"[{ts}] [experiment] {msg}", flush=True)
 
 
+def _build_preds_record(instance_id: str, model: str, patch: str) -> dict:
+    return {
+        "instance_id": instance_id,
+        "model_name_or_path": model,
+        "patch": patch,
+        "model_patch": patch,
+    }
+
+
 # ── data classes ───────────────────────────────────────────────
 
 
@@ -396,12 +405,12 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                         normalized_patch, patch_format_error = normalize_and_validate_patch(patch)
                         if patch_format_error:
                             _elog(
-                                f"Condition {condition}: iid={iid} invalid diff format; "
-                                "marking instance as error"
+                                f"Condition {condition}: iid={iid} diff validation failed: "
+                                f"{patch_format_error}; marking instance as error"
                             )
                             patch = ""
                             run_meta["status"] = "error"
-                            run_meta["error"] = "invalid diff format"
+                            run_meta["error"] = patch_format_error
                         else:
                             patch = normalized_patch
                 except Exception as exc:
@@ -419,11 +428,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                         "error": str(exc),
                     }
 
-                record = {
-                    "instance_id": iid,
-                    "model_name_or_path": config.model,
-                    "model_patch": patch,
-                }
+                record = _build_preds_record(iid, config.model, patch)
                 with cond_preds_path.open("a", encoding="utf-8", newline="\n") as f:
                     f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
                 _elog(f"Condition {condition}: iid={iid} appended preds record")
@@ -512,6 +517,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         unresolved = 0
         errors = 0
         completed = 0
+        empty_patches = 0
         report_path = None
         load_error = None
         try:
@@ -522,6 +528,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             unresolved = int(details.get("unresolved", 0) or 0)
             errors = int(details.get("errors", 0) or 0)
             completed = int(details.get("completed", 0) or 0)
+            empty_patches = int(details.get("empty_patches", 0) or 0)
             report_path = details.get("report_path")
 
             # Propagate harness per-instance outcomes into metrics file when available.
@@ -545,6 +552,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             "unresolved": unresolved,
             "errors": errors,
             "completed": completed,
+            "empty_patches": empty_patches,
             "total": expected_total,
             "attempted": expected_total,
             "rate": rate,

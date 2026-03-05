@@ -9,6 +9,7 @@ def _candidate_eval_dirs(results_dir: Path) -> list[Path]:
     dirs = [results_dir]
     run_id = results_dir.name
     project_root = results_dir.parent.parent
+    dirs.append(project_root)
     dirs.append(project_root / "logs" / "run_evaluation" / run_id)
     seen: set[Path] = set()
     out: list[Path] = []
@@ -31,7 +32,7 @@ def _extract_count(data: dict, key: str) -> int:
 def _find_harness_report_json(eval_dir: Path, run_id: str) -> Path | None:
     """Find harness report file like <model>.<run_id>.json in eval output dir."""
     try:
-        candidates = sorted(eval_dir.glob(f"*.{run_id}.json"))
+        candidates = sorted(eval_dir.glob(f"*{run_id}.json"))
         if candidates:
             return candidates[0]
         # fallback: any JSON file containing run_id in name
@@ -58,23 +59,28 @@ def load_results_details(results_dir: Path) -> dict:
             try:
                 data = json.loads(report_json.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    resolved = _extract_count(data, "resolved")
-                    unresolved = _extract_count(data, "unresolved")
-                    errors = _extract_count(data, "errors")
-                    completed = _extract_count(data, "completed")
-
-                    total = completed if completed > 0 else resolved + unresolved + errors
+                    total = _extract_count(data, "submitted_instances")
                     if total <= 0:
-                        total = _extract_count(data, "applied")
-                        if total <= 0:
-                            total = resolved
+                        total = _extract_count(data, "submitted_ids")
+
+                    completed = _extract_count(data, "completed_instances")
+                    resolved = _extract_count(data, "resolved_instances")
+                    unresolved = _extract_count(data, "unresolved_instances")
+                    errors = _extract_count(data, "error_instances")
+                    empty_patches = _extract_count(data, "empty_patch_instances")
+
+                    if total <= 0:
+                        total = completed if completed > 0 else (resolved + unresolved + errors)
+                    if completed <= 0:
+                        completed = resolved + unresolved + errors
 
                     return {
                         "resolved": int(resolved),
                         "total": int(total),
                         "unresolved": int(unresolved),
                         "errors": int(errors),
-                        "completed": int(completed if completed > 0 else total),
+                        "completed": int(completed),
+                        "empty_patches": int(empty_patches),
                         "report_path": str(report_json),
                         "source": "harness_report_json",
                     }
@@ -119,6 +125,7 @@ def load_results_details(results_dir: Path) -> dict:
                         "unresolved": int(unresolved_count),
                         "errors": int(error_count),
                         "completed": int(completed),
+                        "empty_patches": 0,
                         "report_path": str(results_json),
                         "source": "results_json",
                     }
@@ -151,6 +158,7 @@ def load_results_details(results_dir: Path) -> dict:
                 "unresolved": int(unresolved),
                 "errors": int(errors),
                 "completed": int(total),
+                "empty_patches": 0,
                 "report_path": str(instance_results),
                 "source": "instance_results_jsonl",
             }
@@ -161,6 +169,7 @@ def load_results_details(results_dir: Path) -> dict:
         "unresolved": 0,
         "errors": 0,
         "completed": 0,
+        "empty_patches": 0,
         "report_path": None,
         "source": "none",
     }
