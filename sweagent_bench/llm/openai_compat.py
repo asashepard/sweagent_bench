@@ -55,6 +55,32 @@ def chat_completion(
             NOT retried — caller must handle.
         RuntimeError: If request fails after retries.
     """
+    data = chat_completion_with_metadata(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        timeout_s=timeout_s,
+    )
+    return data["content"]
+
+
+def chat_completion_with_metadata(
+    model: str,
+    messages: list[dict],
+    *,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    max_tokens: int = 512,
+    timeout_s: int = 120,
+) -> dict:
+    """Call chat completion endpoint and return content plus optional usage.
+
+    Returns a dict with keys:
+    - content: assistant text
+    - usage: token usage dict (may be empty)
+    """
     base_url = get_base_url().rstrip("/")
     url = f"{base_url}/chat/completions"
 
@@ -64,8 +90,6 @@ def chat_completion(
     }
 
     request_model = model
-    # OpenAI's native API expects bare model IDs (e.g. "gpt-5.2").
-    # Normalize provider-prefixed names like "openai/gpt-5.2".
     if "api.openai.com" in base_url and "/" in request_model:
         provider, bare = request_model.split("/", 1)
         if provider.strip().lower() == "openai" and bare.strip():
@@ -92,7 +116,16 @@ def chat_completion(
             )
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            usage_raw = data.get("usage", {}) if isinstance(data, dict) else {}
+            usage = usage_raw if isinstance(usage_raw, dict) else {}
+            return {
+                "content": data["choices"][0]["message"]["content"],
+                "usage": {
+                    "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                    "total_tokens": int(usage.get("total_tokens", 0) or 0),
+                },
+            }
         except requests.RequestException as e:
             last_error = e
             if hasattr(e, "response") and e.response is not None:
@@ -100,8 +133,6 @@ def chat_completion(
                 if status and 400 <= status < 500:
                     body = e.response.text[:1200]
 
-                    # ── Context length overflow: IMMEDIATE FAIL ──
-                    # vLLM and OpenAI both return 400 with these markers.
                     if any(marker in body.lower() for marker in (
                         "context_length",
                         "maximum context length",
@@ -113,8 +144,6 @@ def chat_completion(
                             f"Context length exceeded (HTTP {status}): {body[:300]}"
                         ) from e
 
-                    # OpenAI newer models may reject `max_tokens` and require
-                    # `max_completion_tokens`. If so, switch payload and retry.
                     if (
                         "unsupported_parameter" in body
                         and "max_tokens" in body

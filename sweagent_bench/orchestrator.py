@@ -434,15 +434,24 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 _elog(f"Condition {condition}: iid={iid} appended preds record")
 
                 usage = run_meta.get("token_usage", {}) if isinstance(run_meta, dict) else {}
+                reported_tokens = run_meta.get("reported_tokens", {}) if isinstance(run_meta, dict) else {}
+                estimated_tokens = run_meta.get("estimated_tokens", {}) if isinstance(run_meta, dict) else {}
                 metrics_record = {
                     "instance_id": iid,
                     "repo": repo,
                     "condition": condition,
                     "elapsed_s": float(run_meta.get("elapsed_s", 0.0) or 0.0),
+                    "elapsed_s_total": float(run_meta.get("elapsed_s_total", run_meta.get("elapsed_s", 0.0)) or 0.0),
+                    "elapsed_s_llm": float(run_meta.get("elapsed_s_llm", 0.0) or 0.0),
+                    "elapsed_s_tools": float(run_meta.get("elapsed_s_tools", 0.0) or 0.0),
+                    "elapsed_s_eval": float(run_meta.get("elapsed_s_eval", 0.0) or 0.0),
                     "patch_non_empty": bool(patch and patch.strip()),
                     "status": run_meta.get("status", "ok"),
                     "error": run_meta.get("error"),
                     "patch_source": run_meta.get("patch_source", "empty"),
+                    "steps_total": int(run_meta.get("steps_total", 0) or 0),
+                    "steps_actionable": int(run_meta.get("steps_actionable", 0) or 0),
+                    "steps_non_actionable": int(run_meta.get("steps_non_actionable", 0) or 0),
                     "fallback_single_shot_used": bool(run_meta.get("fallback_single_shot_used", False)),
                     "fallback_single_shot_patch_len": int(run_meta.get("fallback_single_shot_patch_len", 0) or 0),
                     "fallback_single_shot_raw_len": int(run_meta.get("fallback_single_shot_raw_len", 0) or 0),
@@ -452,11 +461,28 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                     "stall_type": run_meta.get("stall_type"),
                     "stall_action": run_meta.get("stall_action"),
                     "stall_repeat_count": int(run_meta.get("stall_repeat_count", 0) or 0),
+                    "stall_breaker_used": bool(run_meta.get("stall_breaker_used", False)),
+                    "stall_breaker_command": run_meta.get("stall_breaker_command"),
+                    "extra_blocks_ignored": int(run_meta.get("extra_blocks_ignored", 0) or 0),
+                    "chars_prompt": int(run_meta.get("chars_prompt", 0) or 0),
+                    "chars_completion": int(run_meta.get("chars_completion", 0) or 0),
+                    "token_usage_source": run_meta.get("token_usage_source", "estimated"),
                     "token_usage": {
                         "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
                         "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
                         "total_tokens": int(usage.get("total_tokens", 0) or 0),
                     },
+                    "reported_tokens": {
+                        "prompt_tokens": int(reported_tokens.get("prompt_tokens", 0) or 0),
+                        "completion_tokens": int(reported_tokens.get("completion_tokens", 0) or 0),
+                        "total_tokens": int(reported_tokens.get("total_tokens", 0) or 0),
+                    },
+                    "estimated_tokens": {
+                        "prompt_tokens": int(estimated_tokens.get("prompt_tokens", 0) or 0),
+                        "completion_tokens": int(estimated_tokens.get("completion_tokens", 0) or 0),
+                        "total_tokens": int(estimated_tokens.get("total_tokens", 0) or 0),
+                    },
+                    "step_records": run_meta.get("step_records", []),
                 }
                 with cond_metrics_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(metrics_record, sort_keys=True, ensure_ascii=False) + "\n")
@@ -658,6 +684,17 @@ def _collect_condition_generation_stats(
         "completion_tokens": 0,
         "total_tokens": 0,
     }
+    reported_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    estimated_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    steps_total = 0
+    steps_actionable = 0
+    steps_non_actionable = 0
+    elapsed_s_llm = 0.0
+    elapsed_s_tools = 0.0
+    elapsed_s_eval = 0.0
+    chars_prompt = 0
+    chars_completion = 0
+    token_usage_source_counts: dict[str, int] = {"reported": 0, "estimated": 0}
 
     for iid in target_ids:
         metric = metrics_by_id.get(iid)
@@ -673,6 +710,26 @@ def _collect_condition_generation_stats(
             token_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
             token_usage["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
             token_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+            rep = metric.get("reported_tokens", {}) if isinstance(metric, dict) else {}
+            est = metric.get("estimated_tokens", {}) if isinstance(metric, dict) else {}
+            reported_tokens["prompt_tokens"] += int(rep.get("prompt_tokens", 0) or 0)
+            reported_tokens["completion_tokens"] += int(rep.get("completion_tokens", 0) or 0)
+            reported_tokens["total_tokens"] += int(rep.get("total_tokens", 0) or 0)
+            estimated_tokens["prompt_tokens"] += int(est.get("prompt_tokens", 0) or 0)
+            estimated_tokens["completion_tokens"] += int(est.get("completion_tokens", 0) or 0)
+            estimated_tokens["total_tokens"] += int(est.get("total_tokens", 0) or 0)
+
+            steps_total += int(metric.get("steps_total", 0) or 0)
+            steps_actionable += int(metric.get("steps_actionable", 0) or 0)
+            steps_non_actionable += int(metric.get("steps_non_actionable", 0) or 0)
+            elapsed_s_llm += float(metric.get("elapsed_s_llm", 0.0) or 0.0)
+            elapsed_s_tools += float(metric.get("elapsed_s_tools", 0.0) or 0.0)
+            elapsed_s_eval += float(metric.get("elapsed_s_eval", 0.0) or 0.0)
+            chars_prompt += int(metric.get("chars_prompt", 0) or 0)
+            chars_completion += int(metric.get("chars_completion", 0) or 0)
+            src = str(metric.get("token_usage_source", "") or "")
+            if src in token_usage_source_counts:
+                token_usage_source_counts[src] += 1
 
             status = str(metric.get("status", "") or "")
             if status == "missing_image":
@@ -717,7 +774,18 @@ def _collect_condition_generation_stats(
         "patch_source_counts": patch_source_counts,
         "elapsed_s": elapsed_s,
         "mean_elapsed_s": (elapsed_s / attempted) if attempted else 0.0,
+        "elapsed_s_llm": elapsed_s_llm,
+        "elapsed_s_tools": elapsed_s_tools,
+        "elapsed_s_eval": elapsed_s_eval,
+        "steps_total": steps_total,
+        "steps_actionable": steps_actionable,
+        "steps_non_actionable": steps_non_actionable,
+        "chars_prompt": chars_prompt,
+        "chars_completion": chars_completion,
+        "token_usage_source_counts": token_usage_source_counts,
         "token_usage": token_usage,
+        "reported_tokens": reported_tokens,
+        "estimated_tokens": estimated_tokens,
     }
 
 

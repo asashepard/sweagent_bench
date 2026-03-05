@@ -44,3 +44,13 @@ results/<exp_id>/
   metrics/
   logs/
 ```
+
+`metrics/<condition>_instances.jsonl` records per-instance runner accounting, including:
+- `steps_total`, `steps_actionable`, `steps_non_actionable`
+- `elapsed_s_total`, `elapsed_s_llm`, `elapsed_s_tools`, `elapsed_s_eval`
+- `chars_prompt`, `chars_completion`
+- `token_usage_source` (`reported` or `estimated`)
+- `token_usage`, `reported_tokens`, `estimated_tokens`
+
+`experiment_summary.json` includes condition-level aggregates for the same step/time/token fields
+under each condition's `generation_metrics`.
