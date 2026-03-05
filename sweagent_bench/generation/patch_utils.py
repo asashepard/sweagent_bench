@@ -140,6 +140,53 @@ def _validate_diff_git_sections(patch: str) -> tuple[bool, str | None]:
     return True, None
 
 
+def _validate_hunk_header_counts(patch: str) -> tuple[bool, str | None]:
+    """Validate each hunk header count matches hunk body line counts."""
+    hunk_re = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
+    lines = patch.splitlines()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = hunk_re.match(line)
+        if not match:
+            i += 1
+            continue
+
+        expected_old = int(match.group(2) or "1")
+        expected_new = int(match.group(4) or "1")
+        old_count = 0
+        new_count = 0
+
+        i += 1
+        while i < len(lines):
+            cur = lines[i]
+            if hunk_re.match(cur) or cur.startswith("diff --git ") or cur.startswith("--- a/"):
+                break
+
+            if cur.startswith("-"):
+                old_count += 1
+            elif cur.startswith("+"):
+                new_count += 1
+            elif cur.startswith(" "):
+                old_count += 1
+                new_count += 1
+            elif cur.startswith("\\"):
+                # e.g. '\\ No newline at end of file' does not affect counts
+                pass
+            else:
+                break
+            i += 1
+
+        if expected_old != old_count or expected_new != new_count:
+            return (
+                False,
+                f"invalid hunk header counts: expected {expected_old}/{expected_new} got {old_count}/{new_count}",
+            )
+
+    return True, None
+
+
 def validate_diff_format(patch: str) -> tuple[bool, str | None]:
     """Validate that patch looks like a minimally valid unified diff.
 
@@ -150,8 +197,7 @@ def validate_diff_format(patch: str) -> tuple[bool, str | None]:
     if not patch or not patch.strip():
         return True, None
 
-    if re.search(r"(?m)^diff --git\s+", patch):
-        return _validate_diff_git_sections(patch)
+    has_diff_git = bool(re.search(r"(?m)^diff --git\s+", patch))
 
     has_file_headers = bool(
         re.search(r"(?m)^---\s+a/", patch) and re.search(r"(?m)^\+\+\+\s+b/", patch)
@@ -160,6 +206,15 @@ def validate_diff_format(patch: str) -> tuple[bool, str | None]:
 
     if not has_file_headers or not has_hunk:
         return False, "invalid diff format"
+
+    ok_counts, err_counts = _validate_hunk_header_counts(patch)
+    if not ok_counts:
+        return False, err_counts
+
+    if has_diff_git:
+        ok_sections, err_sections = _validate_diff_git_sections(patch)
+        if not ok_sections:
+            return False, err_sections
 
     return True, None
 

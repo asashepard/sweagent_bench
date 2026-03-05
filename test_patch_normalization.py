@@ -85,6 +85,27 @@ def test_multisection_validation_reports_section_error() -> None:
     assert err is not None and "missing hunk header in section 2" in err
 
 
+def test_hunk_header_count_mismatch_is_rejected() -> None:
+    patch = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,6 +1,7 @@\n"
+        " line1\n"
+        "-line2\n"
+        "+line2_new\n"
+        " line3\n"
+        "-line4\n"
+        "+line4_new\n"
+        "-line5\n"
+        "+line5_new\n"
+        "+line6_added\n"
+    )
+    normalized, err = normalize_and_validate_patch(patch)
+    assert normalized == ""
+    assert err is not None and "expected 6/7 got 5/6" in err
+
+
 if __name__ == "__main__":
     test_missing_trailing_newline_is_fixed()
     test_crlf_is_normalized_to_lf()
@@ -93,4 +114,5 @@ if __name__ == "__main__":
     test_extraction_strips_trailing_commentary()
     test_bogus_index_line_removed()
     test_multisection_validation_reports_section_error()
+    test_hunk_header_count_mismatch_is_rejected()
     print("test_patch_normalization: OK")
