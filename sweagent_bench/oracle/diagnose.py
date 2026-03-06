@@ -77,6 +77,7 @@ def diagnose_failures(
 
 def _parse_edits(raw: str) -> list[Edit]:
     text = raw.strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
 

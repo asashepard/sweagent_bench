@@ -158,6 +158,7 @@ def review_probe(
 
 def _parse_review(raw: str, expected_behaviors: list[str]) -> tuple[list[BehaviorReview], list[Edit], str]:
     text = raw.strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
 

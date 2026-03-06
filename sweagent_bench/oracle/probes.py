@@ -120,6 +120,7 @@ def generate_probes(
     raw = chat_completion(model=model, messages=messages, temperature=0.7, max_tokens=2048, timeout_s=timeout_s)
 
     text = raw.strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
 

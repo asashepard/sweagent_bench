@@ -85,56 +85,6 @@ def _probe_signature(task: str) -> str:
     return _normalize_probe_text(task)
 
 
-def _load_prior_probe_signatures(out_dir: Path, completed_iterations: int) -> set[str]:
-    signatures: set[str] = set()
-    for idx in range(1, completed_iterations + 1):
-        probe_path = out_dir / f"iteration_{idx}_probes.json"
-        if not probe_path.exists():
-            continue
-        try:
-            data = json.loads(probe_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        probes = data if isinstance(data, list) else data.get("probes_kept", [])
-        if not isinstance(probes, list):
-            continue
-        for item in probes:
-            if not isinstance(item, dict):
-                continue
-            task = str(item.get("task", "")).strip()
-            if task:
-                signatures.add(_probe_signature(task))
-    return signatures
-
-
-def _load_prior_probe_tasks(out_dir: Path, completed_iterations: int) -> list[str]:
-    tasks: list[str] = []
-    seen: set[str] = set()
-    for idx in range(1, completed_iterations + 1):
-        probe_path = out_dir / f"iteration_{idx}_probes.json"
-        if not probe_path.exists():
-            continue
-        try:
-            data = json.loads(probe_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        probes = data if isinstance(data, list) else data.get("probes_kept", [])
-        if not isinstance(probes, list):
-            continue
-        for item in probes:
-            if not isinstance(item, dict):
-                continue
-            task = str(item.get("task", "")).strip()
-            if not task:
-                continue
-            sig = _probe_signature(task)
-            if sig in seen:
-                continue
-            seen.add(sig)
-            tasks.append(task)
-    return tasks
-
-
 def _write_iteration_artifacts(
     out_dir: Path,
     iteration: int,
@@ -359,81 +309,12 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         if edits:
             t_apply = time.perf_counter()
             before_agents_md = agents_md
-            agents_md_candidate, apply_meta = apply_edits(
-                agents_md,
-                edits,
-                config.model,
-                timeout_s=config.timeout_s,
-            )
-            apply_stage = str(apply_meta.get("stage", "unknown") or "unknown")
-            apply_used_cleanup = bool(apply_meta.get("used_cleanup", False))
-            apply_trace = apply_meta.get("trace", [])
-            if isinstance(apply_trace, list) and apply_trace:
-                trace_parts: list[str] = []
-                for item in apply_trace:
-                    if not isinstance(item, dict):
-                        continue
-                    stage_name = str(item.get("stage", "?") or "?")
-                    stage_len = int(item.get("length", 0) or 0)
-                    stage_reason = str(item.get("invalid_reason", "") or "")
-                    if stage_reason:
-                        trace_parts.append(f"{stage_name}(len={stage_len}, invalid={stage_reason})")
-                    else:
-                        trace_parts.append(f"{stage_name}(len={stage_len})")
-                if trace_parts:
-                    _olog(
-                        f"Iteration {t}: apply trace stage={apply_stage} "
-                        f"used_cleanup={apply_used_cleanup} :: " + " -> ".join(trace_parts)
-                    )
-            apply_debug_payload = {
-                "accepted": bool(apply_meta.get("accepted", False)),
-                "reason": str(apply_meta.get("reason", "") or ""),
-                "stage": apply_stage,
-                "used_cleanup": apply_used_cleanup,
-                "trace": apply_trace,
-                "raw_len": len(str(apply_meta.get("raw_output", "") or "")),
-                "sanitized_len": len(str(apply_meta.get("sanitized_output", "") or "")),
-                "cleanup_len": len(str(apply_meta.get("cleanup_output", "") or "")),
-                "cleaned_len": len(str(apply_meta.get("cleaned_output", "") or "")),
-            }
-            (out / f"iteration_{t}_apply_debug.json").write_text(
-                json.dumps(apply_debug_payload, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            apply_accepted = bool(apply_meta.get("accepted", True))
-            if apply_accepted:
-                agents_md = agents_md_candidate
-                _olog(
-                    f"Iteration {t}: apply accepted "
-                    f"(stage={apply_stage}, used_cleanup={apply_used_cleanup})"
-                )
-            else:
-                reject_reason = str(apply_meta.get("reason", "invalid_output") or "invalid_output")
-                agents_md = before_agents_md
-                _olog(f"Iteration {t}: apply_edits rejected output; keeping previous guidance ({reject_reason})")
-                rejected_raw = str(apply_meta.get("raw_output", "") or "")
-                rejected_sanitized = str(apply_meta.get("sanitized_output", "") or "")
-                rejected_cleanup = str(apply_meta.get("cleanup_output", "") or "")
-                rejected_cleaned = str(apply_meta.get("cleaned_output", "") or "")
-                rejected_stage = str(apply_meta.get("stage", "unknown") or "unknown")
-                rejected_path = out / f"iteration_{t}_apply_rejected.txt"
-                rejected_path.write_text(
-                    (
-                        f"reason: {reject_reason}\n"
-                        f"stage: {rejected_stage}\n\n"
-                        f"--- RAW OUTPUT ---\n{rejected_raw}\n\n"
-                        f"--- SANITIZED OUTPUT ---\n{rejected_sanitized}\n\n"
-                        f"--- CLEANUP OUTPUT ---\n{rejected_cleanup}\n\n"
-                        f"--- CLEANED OUTPUT ---\n{rejected_cleaned}\n"
-                    ),
-                    encoding="utf-8",
-                )
+            agents_md, apply_meta = apply_edits(agents_md, edits, config.model)
+            trimmed = bool(apply_meta.get("over_budget_trimmed", False))
             _olog(
-                f"Iteration {t}: apply_edits complete in "
-                f"{time.perf_counter() - t_apply:.2f}s"
-            )
-            _olog(
-                f"Iteration {t}: AGENTS.md length {len(before_agents_md)} -> {len(agents_md)} "
+                f"Iteration {t}: apply complete in {time.perf_counter() - t_apply:.4f}s "
+                f"edits_applied={apply_meta.get('edits_applied', 0)} trimmed={trimmed} "
+                f"len={len(before_agents_md)}->{len(agents_md)} "
                 f"(delta={len(agents_md) - len(before_agents_md)})"
             )
         else:
@@ -464,6 +345,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             "probe_execution_mode": ORACLE_PROBE_EXECUTION_MODE,
             "effective_probe_timeout_s": effective_probe_timeout_s,
             "probe_dedup_scope": "iteration_local",
+            "over_budget_trimmed": bool(apply_meta.get("over_budget_trimmed", False)) if edits else False,
         }
         if iter_stop_reason:
             summary["stop_reason"] = iter_stop_reason
@@ -645,6 +527,7 @@ def _prioritize_edits_for_iteration(
             timeout_s=timeout_s,
         )
         text = raw.strip()
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         obj = json.loads(text)
@@ -653,7 +536,8 @@ def _prioritize_edits_for_iteration(
             for v in idxs:
                 if isinstance(v, int):
                     selected_indices.append(v)
-    except Exception:
+    except Exception as exc:
+        _olog(f"Prioritizer JSON parse failed ({exc}); falling back to deduped head")
         selected_indices = []
 
     selected: list[Edit] = []
