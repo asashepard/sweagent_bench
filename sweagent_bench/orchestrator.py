@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +65,7 @@ class ExperimentConfig:
     # Runner settings — adapted for SWE-agent + Qwen 3.5 35B
     timeout_s: int = 1800       # 30 minutes (was 600)
     step_limit: int = 50        # SWE-agent max steps (was 30)
+    max_workers_gen: int = 1    # generation workers per condition (default keeps prior behavior)
     api_base: str | None = None         # vLLM API base URL
     context_window: int = 32768         # Qwen 3.5 35B context window
 
@@ -324,11 +326,15 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         total_instances = sum(len(v) for v in instances_by_repo.values())
         done_count = len(completed_ids)
 
+        repo_keys_to_mark: list[str] = []
+        generation_jobs: list[tuple[str, dict, str | None]] = []
+
         for repo, instances in instances_by_repo.items():
             key = f"{repo}__{condition}"
             if key in state.eval_completed:
                 _elog(f"Condition {condition}: skipping {repo} (already completed key={key})")
                 continue
+            repo_keys_to_mark.append(key)
 
             _elog(f"Condition {condition}: repo {repo} has {len(instances)} instances")
 
@@ -344,83 +350,106 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 else:
                     _elog(f"Condition {condition}: no guidance found for {repo}")
 
-            for i, instance in enumerate(instances):
-                iid = instance["instance_id"]
-                if iid in completed_ids:
-                    _elog(f"Condition {condition}: skipping iid={iid} (already in preds)")
-                    continue
+            pending_instances = [
+                instance for instance in instances
+                if instance["instance_id"] not in completed_ids
+            ]
+            for i, instance in enumerate(pending_instances):
+                _elog(
+                    f"Condition {condition}: queue iid={instance['instance_id']} "
+                    f"({i+1}/{len(pending_instances)} in repo {repo})"
+                )
+                generation_jobs.append((repo, instance, guidance_text))
 
-                try:
-                    t_instance = time.perf_counter()
-                    _elog(
-                        f"Condition {condition}: starting iid={iid} "
-                        f"({i+1}/{len(instances)} in repo {repo})"
-                    )
-                    if dry_run:
-                        patch = ""
-                        run_meta = {
-                            "elapsed_s": 0.0,
-                            "token_usage": {
-                                "prompt_tokens": 0,
-                                "completion_tokens": 0,
-                                "total_tokens": 0,
-                            },
-                            "status": "dry_run",
-                            "error": None,
-                        }
-                    else:
-                        # ── SWE-agent invocation (replaces mini-swe-agent) ──
-                        run_meta = generate_patch_with_sweagent(
-                            instance=instance,
-                            model=config.model,
-                            guidance_text=guidance_text,
-                            timeout_s=config.timeout_s,
-                            max_steps=config.step_limit,
-                            traj_dir=PREDS_DIR / config.experiment_id / condition / "trajectories",
-                            api_base=config.api_base,
-                        )
-                        _elog(
-                            f"Condition {condition}: iid={iid} runner status={run_meta.get('status')} "
-                            f"patch_source={run_meta.get('patch_source')} elapsed={run_meta.get('elapsed_s', 0.0):.2f}s"
-                        )
-                        patch = run_meta.get("patch", "")
-                        _elog(
-                            f"Condition {condition}: iid={iid} raw patch length={len(patch)}"
-                        )
-                        patch, patch_is_noop = sanitize_patch_for_preds(patch)
-                        print(
-                            f"  [{condition}] {iid} patch sanitation: "
-                            f"sanitized_patch_len={len(patch)}, no_op={patch_is_noop}"
-                        )
-                        _elog(
-                            f"Condition {condition}: iid={iid} sanitized patch length={len(patch)} no_op={patch_is_noop}"
-                        )
-
-                        normalized_patch, patch_format_error = normalize_and_validate_patch(patch)
-                        if patch_format_error:
-                            _elog(
-                                f"Condition {condition}: iid={iid} diff validation failed: "
-                                f"{patch_format_error}; marking instance as error"
-                            )
-                            patch = ""
-                            run_meta["status"] = "error"
-                            run_meta["error"] = patch_format_error
-                        else:
-                            patch = normalized_patch
-                except Exception as exc:
-                    print(f"  Eval error {iid}: {exc}", file=sys.stderr)
-                    _elog(f"Condition {condition}: iid={iid} exception: {exc}")
-                    patch = ""
-                    run_meta = {
+        def _run_one_instance(
+            repo: str,
+            instance: dict,
+            guidance_text: str | None,
+        ) -> tuple[str, str, str, dict, float]:
+            iid_local = instance["instance_id"]
+            t_instance = time.perf_counter()
+            try:
+                if dry_run:
+                    patch_local = ""
+                    run_meta_local = {
                         "elapsed_s": 0.0,
                         "token_usage": {
                             "prompt_tokens": 0,
                             "completion_tokens": 0,
                             "total_tokens": 0,
                         },
-                        "status": "error",
-                        "error": str(exc),
+                        "status": "dry_run",
+                        "error": None,
                     }
+                else:
+                    run_meta_local = generate_patch_with_sweagent(
+                        instance=instance,
+                        model=config.model,
+                        guidance_text=guidance_text,
+                        timeout_s=config.timeout_s,
+                        max_steps=config.step_limit,
+                        traj_dir=PREDS_DIR / config.experiment_id / condition / "trajectories",
+                        api_base=config.api_base,
+                    )
+                    patch_local = run_meta_local.get("patch", "")
+                    patch_local, _patch_is_noop = sanitize_patch_for_preds(patch_local)
+
+                    normalized_patch, patch_format_error = normalize_and_validate_patch(patch_local)
+                    if patch_format_error:
+                        patch_local = ""
+                        run_meta_local["status"] = "error"
+                        run_meta_local["error"] = patch_format_error
+                    else:
+                        patch_local = normalized_patch
+            except Exception as exc:
+                patch_local = ""
+                run_meta_local = {
+                    "elapsed_s": 0.0,
+                    "token_usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                    "status": "error",
+                    "error": str(exc),
+                }
+
+            wall_s = time.perf_counter() - t_instance
+            return repo, iid_local, patch_local, run_meta_local, wall_s
+
+        if config.max_workers_gen <= 1 or len(generation_jobs) <= 1:
+            completed_runs = [
+                _run_one_instance(repo, instance, guidance_text)
+                for repo, instance, guidance_text in generation_jobs
+            ]
+        else:
+            max_workers = min(config.max_workers_gen, len(generation_jobs))
+            _elog(
+                f"Condition {condition}: running generation with "
+                f"max_workers_gen={max_workers} jobs={len(generation_jobs)}"
+            )
+            completed_runs: list[tuple[str, str, str, dict, float]] = []
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_job = {
+                    executor.submit(_run_one_instance, repo, instance, guidance_text): (repo, instance)
+                    for repo, instance, guidance_text in generation_jobs
+                }
+                for future in as_completed(future_to_job):
+                    completed_runs.append(future.result())
+
+        for repo, iid, patch, run_meta, wall_s in completed_runs:
+            if run_meta.get("status") == "error" and run_meta.get("error"):
+                _elog(f"Condition {condition}: iid={iid} exception/error: {run_meta.get('error')}")
+            else:
+                _elog(
+                    f"Condition {condition}: iid={iid} runner status={run_meta.get('status')} "
+                    f"patch_source={run_meta.get('patch_source')} elapsed={run_meta.get('elapsed_s', 0.0):.2f}s"
+                )
+                _elog(f"Condition {condition}: iid={iid} raw patch length={len(run_meta.get('patch', '') or '')}")
+                _elog(
+                    f"Condition {condition}: iid={iid} sanitized patch length={len(patch)} "
+                    f"no_op={not bool(patch and patch.strip())}"
+                )
 
                 record = {
                     "instance_id": iid,
@@ -476,16 +505,19 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 )
 
                 done_count += 1
+                completed_ids.add(iid)
                 status = "OK" if patch else "EMPTY"
                 print(f"  [{condition}] [{done_count}/{total_instances}] {iid} -> {status}")
                 _elog(
                     f"Condition {condition}: completed iid={iid} overall_status={status} "
-                    f"wall={time.perf_counter() - t_instance:.2f}s"
+                    f"wall={wall_s:.2f}s"
                 )
 
-            state.eval_completed.append(key)
-            state.save(state_path)
-            _elog(f"Condition {condition}: repo {repo} state key persisted ({key})")
+        for key in repo_keys_to_mark:
+            if key not in state.eval_completed:
+                state.eval_completed.append(key)
+                state.save(state_path)
+                _elog(f"Condition {condition}: repo state key persisted ({key})")
 
         # Run SWE-bench evaluation harness
         run_id = f"{config.experiment_id}__{condition}"

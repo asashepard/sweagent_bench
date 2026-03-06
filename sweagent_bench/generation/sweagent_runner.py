@@ -36,16 +36,30 @@ from sweagent_bench.generation.patch_utils import extract_diff, sanitize_patch_f
 from sweagent_bench.llm.openai_compat import ContextLengthError, chat_completion
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
 # ── Constants ──────────────────────────────────────────────────
 
-DEFAULT_TIMEOUT_S = 1800      # 30 minutes per instance
-DEFAULT_MAX_STEPS = 50        # agent loop iterations
+DEFAULT_TIMEOUT_S = _env_int("SWEAGENT_TIMEOUT_S", 1800)      # 30 minutes per instance
+DEFAULT_MAX_STEPS = _env_int("SWEAGENT_MAX_STEPS_DEFAULT", 50)        # agent loop iterations
 INPUT_SLACK_TOKENS = 1024     # never trim to exact boundary
-DEFAULT_MAX_OUTPUT_TOKENS = 512   # single-shot fallback
-AGENT_MAX_TOKENS = 4096           # per-turn budget in the agent loop
-CMD_TIMEOUT_S = 120               # per-command timeout
-STALL_THRESHOLD = 3               # consecutive identical commands → stall
-PER_COMMAND_OBS_CAP = 4000        # per-command observation cap for message appends
+DEFAULT_MAX_OUTPUT_TOKENS = _env_int("SWEAGENT_FALLBACK_MAX_TOKENS", 512)   # single-shot fallback
+AGENT_MAX_TOKENS = _env_int("SWEAGENT_AGENT_MAX_TOKENS", 2048)           # per-turn budget in the agent loop
+CMD_TIMEOUT_S = _env_int("SWEAGENT_CMD_TIMEOUT_S", 120)               # per-command timeout
+STALL_THRESHOLD = _env_int("SWEAGENT_STALL_THRESHOLD", 3)               # consecutive identical commands → stall
+PER_COMMAND_OBS_CAP = _env_int("SWEAGENT_PER_COMMAND_OBS_CAP", 3000)        # per-command observation cap for message appends
+AGENT_MAX_TURNS = _env_int("SWEAGENT_MAX_TURNS", 8)
+NO_ACTIONABLE_THRESHOLD = _env_int("SWEAGENT_NO_ACTIONABLE_THRESHOLD", 3)
+TREE_MAX_DEPTH = _env_int("SWEAGENT_TREE_MAX_DEPTH", 2)
+TREE_MAX_CHARS = _env_int("SWEAGENT_TREE_MAX_CHARS", 8000)
 
 
 def _rlog(msg: str) -> None:
@@ -174,7 +188,10 @@ def _build_agent_messages(
     """Build the initial system + user messages for the agent loop."""
     from sweagent_bench.prompting.prompt_builder import _build_tree
 
-    tree = _build_tree(repo_dir, max_depth=2)
+    tree = _build_tree(repo_dir, max_depth=TREE_MAX_DEPTH)
+    if len(tree) > TREE_MAX_CHARS:
+        half = max(500, TREE_MAX_CHARS // 2)
+        tree = _truncate_head_tail(tree, max_len=TREE_MAX_CHARS, head=half, tail=half)
     guidance_block = ""
     if guidance_text:
         guidance_block = (
@@ -329,6 +346,7 @@ def _run_agent_loop(
 
     deadline = time.perf_counter() + timeout_s
     recent_cmds: list[str] = []
+    consecutive_non_actionable = 0
     _rlog(
         f"Agent loop start iid={instance.get('instance_id')} repo={instance.get('repo')} "
         f"max_steps={max_steps} timeout_s={timeout_s}"
@@ -353,7 +371,7 @@ def _run_agent_loop(
 
             remaining = max(30, int(deadline - time.perf_counter()))
             t_llm = time.perf_counter()
-            messages = _trim_messages(messages, max_turns=8)
+            messages = _trim_messages(messages, max_turns=AGENT_MAX_TURNS)
             response_text = chat_completion(
                 model=model,
                 messages=messages,
@@ -399,6 +417,7 @@ def _run_agent_loop(
 
         if diff_candidate and ("diff --git" in diff_candidate or "--- " in diff_candidate):
             info["diff_block_found"] = True
+            consecutive_non_actionable = 0
             messages.append({"role": "assistant", "content": response_text})
             _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", diff_candidate)
             _rlog(
@@ -415,6 +434,7 @@ def _run_agent_loop(
         bash_contents = [content for content in bash_blocks if content.strip()]
 
         if bash_contents:
+            consecutive_non_actionable = 0
             _rlog(f"Step {step+1}: executing {len(bash_contents)} bash command block(s)")
             observations: list[str] = []
             stalled = False
@@ -487,12 +507,26 @@ def _run_agent_loop(
                 raw = extract_diff(cleaned)
                 if raw and ("diff --git" in raw or "--- a/" in raw):
                     info["diff_block_found"] = True
+                    consecutive_non_actionable = 0
                     messages.append({"role": "assistant", "content": response_text})
                     _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", raw)
                     _rlog(
                         f"Step {step+1}: extracted raw diff fallback len={len(raw)} returning patch"
                     )
                     return raw, info
+
+            consecutive_non_actionable += 1
+            if consecutive_non_actionable >= NO_ACTIONABLE_THRESHOLD:
+                info["status"] = "non_actionable"
+                info["error"] = (
+                    "Model produced no actionable bash/diff blocks for "
+                    f"{consecutive_non_actionable} consecutive turns"
+                )
+                _rlog(
+                    f"Step {step+1}: early stop non-actionable "
+                    f"consecutive={consecutive_non_actionable}"
+                )
+                break
 
             # Model produced text without actionable blocks — nudge it
             messages.append({"role": "assistant", "content": response_text})
@@ -667,7 +701,7 @@ def generate_patch_with_sweagent(
         try:
             _rlog(f"Instance {iid}: entering single-shot fallback")
             t_fallback = time.perf_counter()
-            patch = _fallback_single_shot(instance, model, guidance_text, api_base)
+            patch = _fallback_single_shot(instance, model, guidance_text, api_base, repo_dir)
             if patch:
                 result["patch"] = patch
                 result["fallback_single_shot_used"] = True
@@ -724,13 +758,12 @@ def _fallback_single_shot(
     model: str,
     guidance_text: str | None,
     api_base: str | None,
+    repo_dir: Path,
 ) -> str:
     """Fallback: generate patch via direct LLM call (no agent loop)."""
-    from sweagent_bench.git.checkout import checkout_repo
     from sweagent_bench.llm.openai_compat import chat_completion
     from sweagent_bench.prompting.prompt_builder import build_messages
 
-    repo_dir = checkout_repo(instance["repo"], instance["base_commit"])
     messages = build_messages(
         problem_statement=instance.get("problem_statement", ""),
         repo=instance["repo"],

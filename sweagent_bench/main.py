@@ -109,6 +109,10 @@ def main(argv: list[str] | None = None) -> int:
         "--max-workers-eval", type=int, default=4,
         help="Parallel workers for SWE-bench eval harness (default: 4)",
     )
+    parser.add_argument(
+        "--max-workers-gen", type=int, default=1,
+        help="Parallel generation workers per condition (default: 1)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -144,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         oracle_probe_max_steps=args.oracle_probe_max_steps,
         timeout_s=args.timeout,
         step_limit=args.step_limit,
+        max_workers_gen=args.max_workers_gen,
         api_base=api_base,
         context_window=args.context_window,
         eval_instance_ids_file=args.instance_ids_file,
@@ -158,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         f"[main] Oracle probe runner: timeout={config.oracle_probe_timeout_s}s "
         f"steps={config.oracle_probe_max_steps}"
     )
+    print(f"[main] Generation workers: {config.max_workers_gen}")
     print(f"[main] Timeout: {config.timeout_s}s, Steps: {config.step_limit}")
     print(f"[main] Repos: {len(repos)}")
     if args.instance_ids_file:
