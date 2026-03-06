@@ -230,8 +230,6 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         lines=agents_md.splitlines(), version=state.current_version,
     )
 
-    prior_probe_signatures = _load_prior_probe_signatures(out, state.completed_iterations)
-    prior_probe_tasks = _load_prior_probe_tasks(out, state.completed_iterations)
     no_change_streak = 0
 
     start_iter = state.completed_iterations + 1
@@ -247,7 +245,9 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         iter_stop_reason = ""
 
         t_probe_gen = time.perf_counter()
-        generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(prior_probe_tasks)]
+        iteration_probe_signatures: set[str] = set()
+        iteration_probe_tasks: list[str] = []
+        generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(iteration_probe_tasks)]
         generated_probes = generate_probes(
             kb,
             config.model,
@@ -260,17 +260,17 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         duplicate_probe_count = 0
         for probe in generated_probes:
             sig = _probe_signature(probe.task)
-            if sig in prior_probe_signatures:
+            if sig in iteration_probe_signatures:
                 duplicate_probe_count += 1
                 continue
-            prior_probe_signatures.add(sig)
-            prior_probe_tasks.append(probe.task)
+            iteration_probe_signatures.add(sig)
+            iteration_probe_tasks.append(probe.task)
             deduped_probes.append(probe)
 
         topup_attempts = 0
         while len(deduped_probes) < TARGET_PROBES_PER_ITERATION and topup_attempts < MAX_PROBE_TOPUP_ATTEMPTS:
             remaining = TARGET_PROBES_PER_ITERATION - len(deduped_probes)
-            generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(prior_probe_tasks)]
+            generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(iteration_probe_tasks)]
             topup_batch = generate_probes(
                 kb,
                 config.model,
@@ -285,11 +285,11 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             generated_probes.extend(topup_batch)
             for probe in topup_batch:
                 sig = _probe_signature(probe.task)
-                if sig in prior_probe_signatures:
+                if sig in iteration_probe_signatures:
                     duplicate_probe_count += 1
                     continue
-                prior_probe_signatures.add(sig)
-                prior_probe_tasks.append(probe.task)
+                iteration_probe_signatures.add(sig)
+                iteration_probe_tasks.append(probe.task)
                 deduped_probes.append(probe)
 
         target_probes_met = len(deduped_probes) >= TARGET_PROBES_PER_ITERATION
@@ -365,21 +365,66 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
                 config.model,
                 timeout_s=config.timeout_s,
             )
+            apply_stage = str(apply_meta.get("stage", "unknown") or "unknown")
+            apply_used_cleanup = bool(apply_meta.get("used_cleanup", False))
+            apply_trace = apply_meta.get("trace", [])
+            if isinstance(apply_trace, list) and apply_trace:
+                trace_parts: list[str] = []
+                for item in apply_trace:
+                    if not isinstance(item, dict):
+                        continue
+                    stage_name = str(item.get("stage", "?") or "?")
+                    stage_len = int(item.get("length", 0) or 0)
+                    stage_reason = str(item.get("invalid_reason", "") or "")
+                    if stage_reason:
+                        trace_parts.append(f"{stage_name}(len={stage_len}, invalid={stage_reason})")
+                    else:
+                        trace_parts.append(f"{stage_name}(len={stage_len})")
+                if trace_parts:
+                    _olog(
+                        f"Iteration {t}: apply trace stage={apply_stage} "
+                        f"used_cleanup={apply_used_cleanup} :: " + " -> ".join(trace_parts)
+                    )
+            apply_debug_payload = {
+                "accepted": bool(apply_meta.get("accepted", False)),
+                "reason": str(apply_meta.get("reason", "") or ""),
+                "stage": apply_stage,
+                "used_cleanup": apply_used_cleanup,
+                "trace": apply_trace,
+                "raw_len": len(str(apply_meta.get("raw_output", "") or "")),
+                "sanitized_len": len(str(apply_meta.get("sanitized_output", "") or "")),
+                "cleanup_len": len(str(apply_meta.get("cleanup_output", "") or "")),
+                "cleaned_len": len(str(apply_meta.get("cleaned_output", "") or "")),
+            }
+            (out / f"iteration_{t}_apply_debug.json").write_text(
+                json.dumps(apply_debug_payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
             apply_accepted = bool(apply_meta.get("accepted", True))
             if apply_accepted:
                 agents_md = agents_md_candidate
+                _olog(
+                    f"Iteration {t}: apply accepted "
+                    f"(stage={apply_stage}, used_cleanup={apply_used_cleanup})"
+                )
             else:
                 reject_reason = str(apply_meta.get("reason", "invalid_output") or "invalid_output")
                 agents_md = before_agents_md
                 _olog(f"Iteration {t}: apply_edits rejected output; keeping previous guidance ({reject_reason})")
                 rejected_raw = str(apply_meta.get("raw_output", "") or "")
                 rejected_sanitized = str(apply_meta.get("sanitized_output", "") or "")
+                rejected_cleanup = str(apply_meta.get("cleanup_output", "") or "")
+                rejected_cleaned = str(apply_meta.get("cleaned_output", "") or "")
+                rejected_stage = str(apply_meta.get("stage", "unknown") or "unknown")
                 rejected_path = out / f"iteration_{t}_apply_rejected.txt"
                 rejected_path.write_text(
                     (
-                        f"reason: {reject_reason}\n\n"
+                        f"reason: {reject_reason}\n"
+                        f"stage: {rejected_stage}\n\n"
                         f"--- RAW OUTPUT ---\n{rejected_raw}\n\n"
-                        f"--- SANITIZED OUTPUT ---\n{rejected_sanitized}\n"
+                        f"--- SANITIZED OUTPUT ---\n{rejected_sanitized}\n\n"
+                        f"--- CLEANUP OUTPUT ---\n{rejected_cleanup}\n\n"
+                        f"--- CLEANED OUTPUT ---\n{rejected_cleaned}\n"
                     ),
                     encoding="utf-8",
                 )
@@ -418,6 +463,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             "no_change_counted": no_change_counted,
             "probe_execution_mode": ORACLE_PROBE_EXECUTION_MODE,
             "effective_probe_timeout_s": effective_probe_timeout_s,
+            "probe_dedup_scope": "iteration_local",
         }
         if iter_stop_reason:
             summary["stop_reason"] = iter_stop_reason
