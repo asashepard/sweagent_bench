@@ -1,6 +1,7 @@
 """Continuous oracle tuning loop for AGENTS.md."""
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 import re
 import time
@@ -37,6 +38,67 @@ def _summarize_edit(edit: Edit, max_len: int = 180) -> str:
     if len(content) > max_len:
         content = content[: max_len - 3] + "..."
     return f"section={edit.section!r} action={edit.action!r} content={content!r}"
+
+
+def _normalize_probe_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _probe_signature(task: str) -> str:
+    return _normalize_probe_text(task)
+
+
+def _load_prior_probe_signatures(out_dir: Path, completed_iterations: int) -> set[str]:
+    signatures: set[str] = set()
+    for idx in range(1, completed_iterations + 1):
+        probe_path = out_dir / f"iteration_{idx}_probes.json"
+        if not probe_path.exists():
+            continue
+        try:
+            data = json.loads(probe_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        probes = data if isinstance(data, list) else data.get("probes_kept", [])
+        if not isinstance(probes, list):
+            continue
+        for item in probes:
+            if not isinstance(item, dict):
+                continue
+            task = str(item.get("task", "")).strip()
+            if task:
+                signatures.add(_probe_signature(task))
+    return signatures
+
+
+def _write_iteration_artifacts(
+    out_dir: Path,
+    iteration: int,
+    probes_payload: dict,
+    edits_selected: list[Edit],
+    guidance_before: str,
+    guidance_after: str,
+    summary: dict,
+) -> None:
+    (out_dir / f"iteration_{iteration}_probes.json").write_text(
+        json.dumps(probes_payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (out_dir / f"iteration_{iteration}_edits_selected.json").write_text(
+        json.dumps([asdict(e) for e in edits_selected], indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (out_dir / f"iteration_{iteration}_guidance_before.md").write_text(
+        guidance_before,
+        encoding="utf-8",
+    )
+    (out_dir / f"iteration_{iteration}_guidance_after.md").write_text(
+        guidance_after,
+        encoding="utf-8",
+    )
+    (out_dir / f"iteration_{iteration}_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
@@ -103,28 +165,46 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         lines=agents_md.splitlines(), version=state.current_version,
     )
 
+    prior_probe_signatures = _load_prior_probe_signatures(out, state.completed_iterations)
+    no_change_streak = 0
+
     start_iter = state.completed_iterations + 1
     for t in range(start_iter, config.iterations + 1):
         iter_start = time.perf_counter()
         _olog(f"Iteration {t}/{config.iterations} started for {config.repo}")
+        guidance_before = agents_md
+        iter_stop_reason = ""
 
         t_probe_gen = time.perf_counter()
-        new_probes = generate_probes(
+        generated_probes = generate_probes(
             kb, config.model, agents_md,
             prior_probes=[], timeout_s=config.timeout_s,
         )
+        deduped_probes: list[Probe] = []
+        duplicate_probe_count = 0
+        for probe in generated_probes:
+            sig = _probe_signature(probe.task)
+            if sig in prior_probe_signatures:
+                duplicate_probe_count += 1
+                continue
+            prior_probe_signatures.add(sig)
+            deduped_probes.append(probe)
         _olog(
-            f"Iteration {t}: generated {len(new_probes)} probes in "
-            f"{time.perf_counter() - t_probe_gen:.2f}s (pool={len(new_probes)})"
+            f"Iteration {t}: generated {len(generated_probes)} probes in "
+            f"{time.perf_counter() - t_probe_gen:.2f}s (pool={len(generated_probes)})"
         )
-        if new_probes:
-            probe_ids = ", ".join(p.id for p in new_probes)
+        _olog(
+            f"Iteration {t}: probe dedup dropped={duplicate_probe_count} "
+            f"kept={len(deduped_probes)}"
+        )
+        if deduped_probes:
+            probe_ids = ", ".join(p.id for p in deduped_probes)
             _olog(f"Iteration {t}: probe ids this round: {probe_ids}")
         else:
-            _olog(f"Iteration {t}: no probes generated; continuing with empty result set")
+            _olog(f"Iteration {t}: no probes kept after dedup; continuing with empty result set")
 
         t_eval = time.perf_counter()
-        results = _evaluate_all_probes_detailed(agents_md, new_probes, config)
+        results = _evaluate_all_probes_detailed(agents_md, deduped_probes, config)
         _olog(
             f"Iteration {t}: evaluated {len(results)} probes in "
             f"{time.perf_counter() - t_eval:.2f}s"
@@ -155,7 +235,11 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             for idx, edit in enumerate(edits, start=1):
                 _olog(f"Iteration {t}: edit {idx}/{len(edits)} -> {_summarize_edit(edit)}")
         else:
-            _olog(f"Iteration {t}: no deduped edits to apply")
+            iter_stop_reason = "no_selected_edits"
+            _olog(
+                f"Iteration {t}: prioritization selected zero edits "
+                f"(reason={iter_stop_reason})"
+            )
 
         if edits:
             t_apply = time.perf_counter()
@@ -170,7 +254,41 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
                 f"(delta={len(agents_md) - len(before_agents_md)})"
             )
         else:
-            _olog(f"Iteration {t}: no edits to apply")
+            _olog(f"Iteration {t}: no edits applied (reason=no_selected_edits)")
+
+        guidance_changed = agents_md != guidance_before
+        if not guidance_changed and not iter_stop_reason:
+            iter_stop_reason = "no_guidance_change"
+
+        if not edits or not guidance_changed:
+            no_change_streak += 1
+        else:
+            no_change_streak = 0
+
+        summary: dict = {
+            "probe_count_generated": len(generated_probes),
+            "probe_count_after_dedup": len(deduped_probes),
+            "selected_edit_count": len(edits),
+            "guidance_changed": guidance_changed,
+        }
+        if iter_stop_reason:
+            summary["stop_reason"] = iter_stop_reason
+
+        probes_payload = {
+            "probe_count_generated": len(generated_probes),
+            "duplicate_count_dropped": duplicate_probe_count,
+            "probe_count_kept": len(deduped_probes),
+            "probes_kept": [asdict(p) for p in deduped_probes],
+        }
+        _write_iteration_artifacts(
+            out_dir=out,
+            iteration=t,
+            probes_payload=probes_payload,
+            edits_selected=edits,
+            guidance_before=guidance_before,
+            guidance_after=agents_md,
+            summary=summary,
+        )
 
         new_version = current.version + 1
         current = RepoGuidance(
@@ -183,7 +301,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         state.completed_iterations = t
         state.history.append({
             "version": new_version, "iteration": t,
-            "probe_pool_size": len(new_probes), "new_probes": len(new_probes),
+            "probe_pool_size": len(deduped_probes), "new_probes": len(deduped_probes),
             "edits_count": len(edits),
         })
         state.save(state_path)
@@ -193,6 +311,21 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         )
 
         _olog(f"Iteration {t} complete in {time.perf_counter() - iter_start:.2f}s; saved v{new_version}")
+
+        if no_change_streak >= 2:
+            stop_reason = "2 consecutive no-change iterations"
+            _olog(f"Iteration {t}: stopping oracle early ({stop_reason})")
+            final_summary_path = out / f"iteration_{t}_summary.json"
+            try:
+                final_summary = json.loads(final_summary_path.read_text(encoding="utf-8"))
+            except Exception:
+                final_summary = summary
+            final_summary["stop_reason"] = stop_reason
+            final_summary_path.write_text(
+                json.dumps(final_summary, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            break
 
     final_path = out / "best_guidance.json"
     current.save(final_path)
