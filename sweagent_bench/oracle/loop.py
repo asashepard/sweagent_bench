@@ -33,10 +33,10 @@ _EDIT_PRIORITIZER_SYSTEM = """\
 You are selecting the best AGENTS.md edits from candidate proposals.
 
 Return ONLY valid JSON with this shape:
-{
+{{
     "selected_indices": [0, 4, 2],
     "notes": "optional short rationale"
-}
+}}
 
 Rules:
 - Select up to {max_edits} candidates by index.
