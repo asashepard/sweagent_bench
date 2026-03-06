@@ -21,13 +21,15 @@ Rules:
 - "modify" → replace or rephrase the closest matching rule in that section.
 - "strengthen" → make an existing rule more specific/forceful.
 - "remove" → delete the matching rule from that section.
+- You have explicit liberty to delete, rewrite, or reorganize existing AGENTS.md content when needed to apply edits well.
+- Prefer concise guidance; remove low-value or redundant static details when they conflict with stronger guidance.
 - Also resolve direct conflicts with existing guidance:
     - If an old rule directly contradicts a newly edited rule, keep the newly edited rule and remove the conflicting old rule.
     - If an old rule is a weaker duplicate of a newly strengthened rule, keep only the stronger/newer phrasing.
     - Do not invent unrelated new rules while resolving conflicts.
     - Keep conflict cleanup local to touched sections when possible.
 - Keep the final AGENTS.md under {char_budget} characters.
-- Preserve the overall structure and formatting.
+- Preserve clear markdown readability.
 - Output ONLY the updated AGENTS.md. No commentary."""
 
 _APPLY_USER = """\
