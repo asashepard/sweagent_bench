@@ -25,6 +25,8 @@ MAX_EDITS_PER_ITERATION = 8
 RESERVED_CHAR_BUFFER = 640
 SOFT_CHAR_BUDGET = AGENTS_MD_CHAR_BUDGET - RESERVED_CHAR_BUFFER
 MIN_EDIT_SUPPORT_DEFAULT = 2
+FORCED_ORACLE_PROBE_TIMEOUT_S = 600
+ORACLE_PROBE_EXECUTION_MODE = "single_shot"
 
 
 def _olog(msg: str) -> None:
@@ -68,6 +70,34 @@ def _load_prior_probe_signatures(out_dir: Path, completed_iterations: int) -> se
             if task:
                 signatures.add(_probe_signature(task))
     return signatures
+
+
+def _load_prior_probe_tasks(out_dir: Path, completed_iterations: int) -> list[str]:
+    tasks: list[str] = []
+    seen: set[str] = set()
+    for idx in range(1, completed_iterations + 1):
+        probe_path = out_dir / f"iteration_{idx}_probes.json"
+        if not probe_path.exists():
+            continue
+        try:
+            data = json.loads(probe_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        probes = data if isinstance(data, list) else data.get("probes_kept", [])
+        if not isinstance(probes, list):
+            continue
+        for item in probes:
+            if not isinstance(item, dict):
+                continue
+            task = str(item.get("task", "")).strip()
+            if not task:
+                continue
+            sig = _probe_signature(task)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            tasks.append(task)
+    return tasks
 
 
 def _write_iteration_artifacts(
@@ -166,19 +196,28 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
     )
 
     prior_probe_signatures = _load_prior_probe_signatures(out, state.completed_iterations)
+    prior_probe_tasks = _load_prior_probe_tasks(out, state.completed_iterations)
     no_change_streak = 0
 
     start_iter = state.completed_iterations + 1
     for t in range(start_iter, config.iterations + 1):
         iter_start = time.perf_counter()
         _olog(f"Iteration {t}/{config.iterations} started for {config.repo}")
+        _olog(
+            f"Iteration {t}: probe execution mode={ORACLE_PROBE_EXECUTION_MODE} "
+            f"timeout_s={FORCED_ORACLE_PROBE_TIMEOUT_S} (forced)"
+        )
         guidance_before = agents_md
         iter_stop_reason = ""
 
         t_probe_gen = time.perf_counter()
+        generation_prior = [
+            Probe(id=f"prior_{i}", task=task)
+            for i, task in enumerate(prior_probe_tasks)
+        ]
         generated_probes = generate_probes(
             kb, config.model, agents_md,
-            prior_probes=[], timeout_s=config.timeout_s,
+            prior_probes=generation_prior, timeout_s=config.timeout_s,
         )
         deduped_probes: list[Probe] = []
         duplicate_probe_count = 0
@@ -188,6 +227,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
                 duplicate_probe_count += 1
                 continue
             prior_probe_signatures.add(sig)
+            prior_probe_tasks.append(probe.task)
             deduped_probes.append(probe)
         _olog(
             f"Iteration {t}: generated {len(generated_probes)} probes in "
@@ -201,10 +241,12 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             probe_ids = ", ".join(p.id for p in deduped_probes)
             _olog(f"Iteration {t}: probe ids this round: {probe_ids}")
         else:
+            iter_stop_reason = "no_probes_after_dedup"
             _olog(f"Iteration {t}: no probes kept after dedup; continuing with empty result set")
 
         t_eval = time.perf_counter()
         results = _evaluate_all_probes_detailed(agents_md, deduped_probes, config)
+        probe_count_evaluated = len(results)
         _olog(
             f"Iteration {t}: evaluated {len(results)} probes in "
             f"{time.perf_counter() - t_eval:.2f}s"
@@ -235,7 +277,8 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             for idx, edit in enumerate(edits, start=1):
                 _olog(f"Iteration {t}: edit {idx}/{len(edits)} -> {_summarize_edit(edit)}")
         else:
-            iter_stop_reason = "no_selected_edits"
+            if not iter_stop_reason:
+                iter_stop_reason = "no_selected_edits"
             _olog(
                 f"Iteration {t}: prioritization selected zero edits "
                 f"(reason={iter_stop_reason})"
@@ -260,7 +303,11 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         if not guidance_changed and not iter_stop_reason:
             iter_stop_reason = "no_guidance_change"
 
-        if not edits or not guidance_changed:
+        no_change_counted = False
+        if probe_count_evaluated == 0:
+            no_change_streak = 0
+        elif not edits or not guidance_changed:
+            no_change_counted = True
             no_change_streak += 1
         else:
             no_change_streak = 0
@@ -268,8 +315,12 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         summary: dict = {
             "probe_count_generated": len(generated_probes),
             "probe_count_after_dedup": len(deduped_probes),
+            "probe_count_evaluated": probe_count_evaluated,
             "selected_edit_count": len(edits),
             "guidance_changed": guidance_changed,
+            "no_change_counted": no_change_counted,
+            "probe_execution_mode": ORACLE_PROBE_EXECUTION_MODE,
+            "effective_probe_timeout_s": FORCED_ORACLE_PROBE_TIMEOUT_S,
         }
         if iter_stop_reason:
             summary["stop_reason"] = iter_stop_reason
@@ -313,7 +364,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         _olog(f"Iteration {t} complete in {time.perf_counter() - iter_start:.2f}s; saved v{new_version}")
 
         if no_change_streak >= 2:
-            stop_reason = "2 consecutive no-change iterations"
+            stop_reason = "2 consecutive no-change iterations with evaluated probes"
             _olog(f"Iteration {t}: stopping oracle early ({stop_reason})")
             final_summary_path = out / f"iteration_{t}_summary.json"
             try:
@@ -340,6 +391,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
 def _evaluate_all_probes_detailed(
     agents_md: str, probes: list[Probe], config: OracleConfig,
 ) -> list[ProbeResult]:
+    effective_probe_timeout_s = FORCED_ORACLE_PROBE_TIMEOUT_S
     results: list[ProbeResult] = []
     for i, probe in enumerate(probes):
         try:
@@ -352,8 +404,7 @@ def _evaluate_all_probes_detailed(
                 repo=config.repo,
                 commit=config.commit,
                 timeout_s=config.timeout_s,
-                probe_timeout_s=config.probe_timeout_s,
-                probe_max_steps=config.probe_max_steps,
+                probe_timeout_s=effective_probe_timeout_s,
                 api_base=config.api_base,
             )
             results.append(result)

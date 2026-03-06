@@ -78,10 +78,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Per-probe runner timeout during oracle tuning in seconds (default: 600)",
     )
     parser.add_argument(
-        "--oracle-probe-max-steps", type=int, default=25,
-        help="Max runner steps per oracle probe (default: 25)",
-    )
-    parser.add_argument(
         "--timeout", type=int, default=1800,
         help="Per-instance timeout in seconds (default: 1800)",
     )
@@ -145,7 +141,6 @@ def main(argv: list[str] | None = None) -> int:
         conditions=args.conditions,
         oracle_iterations=args.oracle_iterations,
         oracle_probe_timeout_s=args.oracle_probe_timeout,
-        oracle_probe_max_steps=args.oracle_probe_max_steps,
         timeout_s=args.timeout,
         step_limit=args.step_limit,
         max_workers_gen=args.max_workers_gen,
@@ -160,8 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[main] Conditions: {config.conditions}")
     print(f"[main] API base: {api_base}")
     print(
-        f"[main] Oracle probe runner: timeout={config.oracle_probe_timeout_s}s "
-        f"steps={config.oracle_probe_max_steps}"
+        f"[main] Oracle probe runner: mode=single_shot timeout={config.oracle_probe_timeout_s}s"
     )
     print(f"[main] Generation workers: {config.max_workers_gen}")
     print(f"[main] Timeout: {config.timeout_s}s, Steps: {config.step_limit}")

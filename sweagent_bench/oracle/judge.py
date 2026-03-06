@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
-from sweagent_bench.generation.sweagent_runner import generate_patch_with_sweagent
+from sweagent_bench.generation.sweagent_runner import _fallback_single_shot
 from sweagent_bench.llm.openai_compat import chat_completion
+from sweagent_bench.git.checkout import checkout_repo
 from sweagent_bench.oracle.schema import BehaviorReview, Edit, Probe, ProbeResult
 
 SYSTEM_PROMPT_CHAR_BUDGET = 60_000
@@ -54,7 +56,7 @@ EXPECTED BEHAVIORS:
 Produce behavior_reviews and proposed_edits JSON."""
 
 
-def run_probe_with_runner(
+def run_probe_single_shot(
     agents_md: str,
     probe: Probe,
     model: str,
@@ -62,7 +64,6 @@ def run_probe_with_runner(
     repo: str,
     commit: str,
     probe_timeout_s: int,
-    probe_max_steps: int,
     api_base: str | None,
 ) -> tuple[str, dict]:
     instance = {
@@ -71,15 +72,53 @@ def run_probe_with_runner(
         "base_commit": commit,
         "problem_statement": probe.task,
     }
-    run_meta = generate_patch_with_sweagent(
-        instance=instance,
-        model=model,
-        guidance_text=agents_md[:SYSTEM_PROMPT_CHAR_BUDGET],
-        timeout_s=max(30, int(probe_timeout_s)),
-        max_steps=max(1, int(probe_max_steps)),
-        traj_dir=None,
-        api_base=api_base,
-    )
+    t_start = time.perf_counter()
+    run_meta: dict = {
+        "instance_id": instance["instance_id"],
+        "patch": "",
+        "elapsed_s": 0.0,
+        "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "token_usage_source": "estimated",
+        "reported_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "estimated_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "status": "ok",
+        "error": None,
+        "patch_source": "empty",
+        "fallback_single_shot_used": True,
+        "fallback_single_shot_patch_len": 0,
+        "fallback_reason": "oracle_probe_single_shot_mode",
+    }
+
+    try:
+        repo_dir = checkout_repo(repo, commit)
+        patch, token_meta = _fallback_single_shot(
+            instance,
+            model,
+            agents_md[:SYSTEM_PROMPT_CHAR_BUDGET],
+            api_base,
+            repo_dir,
+            timeout_s=max(30, int(probe_timeout_s)),
+        )
+        run_meta["patch"] = patch
+        run_meta["fallback_single_shot_patch_len"] = len(patch)
+        run_meta["patch_source"] = "fallback_single_shot" if patch.strip() else "empty"
+        if isinstance(token_meta, dict):
+            usage = token_meta.get("token_usage", {})
+            run_meta["token_usage"] = {
+                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                "total_tokens": int(usage.get("total_tokens", 0) or 0),
+            }
+            run_meta["token_usage_source"] = str(token_meta.get("token_usage_source", "estimated") or "estimated")
+            run_meta["reported_tokens"] = token_meta.get("reported_tokens", run_meta["reported_tokens"])
+            run_meta["estimated_tokens"] = token_meta.get("estimated_tokens", run_meta["estimated_tokens"])
+    except Exception as exc:
+        run_meta["status"] = "error"
+        run_meta["error"] = str(exc)
+        run_meta["patch"] = ""
+        run_meta["patch_source"] = "empty"
+    finally:
+        run_meta["elapsed_s"] = time.perf_counter() - t_start
 
     patch = str(run_meta.get("patch", "") or "")
     patch_preview = ""
@@ -94,12 +133,8 @@ def run_probe_with_runner(
         f"patch_source: {run_meta.get('patch_source')}\n"
         f"patch_len: {len(patch)}\n"
         f"elapsed_s: {float(run_meta.get('elapsed_s', 0.0) or 0.0):.2f}\n"
-        f"stall_detected: {bool(run_meta.get('stall_detected', False))}\n"
-        f"stall_type: {run_meta.get('stall_type')}\n"
-        f"stall_repeat_count: {int(run_meta.get('stall_repeat_count', 0) or 0)}\n"
-        f"no_bash_block_count: {int(run_meta.get('no_bash_block_count', 0) or 0)}\n"
-        f"empty_bash_block_count: {int(run_meta.get('empty_bash_block_count', 0) or 0)}\n"
-        f"repeated_command_stall_count: {int(run_meta.get('repeated_command_stall_count', 0) or 0)}\n"
+        f"token_usage_source: {run_meta.get('token_usage_source')}\n"
+        f"token_total: {int((run_meta.get('token_usage') or {}).get('total_tokens', 0) or 0)}\n"
         f"fallback_single_shot_used: {bool(run_meta.get('fallback_single_shot_used', False))}"
         f"{patch_preview}"
     )
@@ -203,17 +238,15 @@ def evaluate_probe(
     commit: str,
     timeout_s: int = 120,
     probe_timeout_s: int = 300,
-    probe_max_steps: int = 8,
     api_base: str | None = None,
 ) -> ProbeResult:
-    response, run_meta = run_probe_with_runner(
+    response, run_meta = run_probe_single_shot(
         agents_md,
         probe,
         model,
         repo=repo,
         commit=commit,
         probe_timeout_s=probe_timeout_s,
-        probe_max_steps=probe_max_steps,
         api_base=api_base,
     )
     behavior_reviews, proposed_edits, overall_notes = review_probe(

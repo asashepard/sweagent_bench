@@ -27,7 +27,6 @@ STEP_LIMIT="${STEP_LIMIT:-50}"
 MAX_WORKERS_GEN="${MAX_WORKERS_GEN:-1}"
 ORACLE_ITERS="${ORACLE_ITERS:-5}"
 ORACLE_PROBE_TIMEOUT="${ORACLE_PROBE_TIMEOUT:-600}"
-ORACLE_PROBE_MAX_STEPS="${ORACLE_PROBE_MAX_STEPS:-25}"
 MAX_WORKERS_EVAL="${MAX_WORKERS_EVAL:-8}"
 SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-1}"
 
@@ -62,7 +61,6 @@ echo "  Timeout:       ${TIMEOUT}s"
 echo "  Step limit:    $STEP_LIMIT"
 echo "  Gen workers:   $MAX_WORKERS_GEN"
 echo "  Oracle probe timeout: ${ORACLE_PROBE_TIMEOUT}s"
-echo "  Oracle probe max steps: $ORACLE_PROBE_MAX_STEPS"
 echo "  Eval workers:  $MAX_WORKERS_EVAL"
 echo "  Skip preflight: $SKIP_PREFLIGHT"
 echo "  API base:      ${OPENAI_BASE_URL:-http://localhost:8000/v1}"
@@ -91,7 +89,6 @@ python -m sweagent_bench.main \
     --repos-config configs/repos_12.json \
     --oracle-iterations "$ORACLE_ITERS" \
     --oracle-probe-timeout "$ORACLE_PROBE_TIMEOUT" \
-    --oracle-probe-max-steps "$ORACLE_PROBE_MAX_STEPS" \
     --max-workers-gen "$MAX_WORKERS_GEN" \
     --max-workers-eval "$MAX_WORKERS_EVAL" \
     --timeout "$TIMEOUT" \
