@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_CHAR_BUDGET = 3200
+DEFAULT_CHAR_BUDGET = 3000
 
 
 @dataclass

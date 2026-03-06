@@ -25,7 +25,7 @@ Rules:
 - Prefer "modify"/"strengthen" over many new "add" rules.
 - Edits are optional: return [] when confidence is low or guidance is already strong.
 - Return at most 6 edits.
-- Keep the total AGENTS.md under 3,200 characters.
+- Keep the total AGENTS.md under 3,000 characters.
 - Output ONLY the JSON array."""
 
 _DIAGNOSE_USER = """\

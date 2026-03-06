@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sweagent_bench.kb.schema import RepoKB
 
-AGENTS_MD_CHAR_BUDGET = 3200
+AGENTS_MD_CHAR_BUDGET = 3000
 
 
 def _extract_hub_rules(kb: RepoKB) -> list[str]:
