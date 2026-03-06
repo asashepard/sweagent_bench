@@ -24,11 +24,12 @@ Return ONLY a JSON array of probe objects with this shape:
 ]
 
 Rules:
-- 6-10 probes, diverse across bug-fix, test-failure, and code navigation tasks.
+- 6-10 probes, diverse across bug-fix and test-failure tasks.
 - Tasks must be concrete coding requests, not AGENTS/meta questions.
 - Each probe must include 2-4 expected behaviors.
 - Expected behaviors must emphasize: evidence-first localization, dependency tracing, minimal scoped edits, and targeted validation.
-- Tasks should be executable by a tool-using coding runner (inspect files, run commands, propose code diff).
+- Every task must be patchable and executable by a tool-using coding runner (inspect files, run commands, propose code diff).
+- Avoid pure advisory/navigation-only tasks that do not naturally end in a code diff.
 - Avoid duplicates with prior tasks.
 - Maximum {max_probes} probes.
 """
@@ -53,7 +54,8 @@ Generate probes now.
 
 Additional requirements for this batch:
 - Include realistic technical context (module/function/test hints) when possible.
-- Prefer scoped fixes; avoid broad refactors."""
+- Prefer scoped fixes; avoid broad refactors.
+- Phrase each task as a request to fix a concrete failing behavior or test regression."""
 
 
 def _make_probe_id(task: str) -> str:
@@ -62,18 +64,18 @@ def _make_probe_id(task: str) -> str:
 
 def _fallback_probes(kb: RepoKB, limit: int) -> list[Probe]:
     tasks = [
-        f"I need to make a risky change in {kb.repo}. What files and tests should I check first?",
-        f"I am adding a new feature in {kb.repo}. What repo-specific conventions should I follow?",
-        f"I changed a core module in {kb.repo}. How should I validate blast radius before submission?",
+        f"A regression was introduced in {kb.repo}: fix the failing behavior with a minimal patch and validate with targeted tests.",
+        f"A recently changed code path in {kb.repo} now fails existing tests: localize the cause and submit a focused diff.",
+        f"A bug in a high-impact module in {kb.repo} causes incorrect output: trace dependencies, patch the root cause, and validate.",
     ]
     probes: list[Probe] = []
     for task in tasks[:limit]:
         probes.append(Probe(
             id=_make_probe_id(task), task=task,
             expected_behaviors=[
-                "Identifies impacted files or integration points",
-                "Recommends concrete validation/test steps",
-                "Uses repository-specific guidance from AGENTS.md",
+                "Localizes likely files/functions before editing",
+                "Applies a minimal scoped code change",
+                "Runs targeted validation relevant to the change",
             ],
             rationale="Fallback probe due to generation parse/error.",
         ))

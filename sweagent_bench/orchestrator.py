@@ -58,8 +58,8 @@ class ExperimentConfig:
 
     # Oracle tuning hyperparams
     oracle_iterations: int = 5
-    oracle_probe_timeout_s: int = 300
-    oracle_probe_max_steps: int = 8
+    oracle_probe_timeout_s: int = 600
+    oracle_probe_max_steps: int = 16
 
     # Runner settings — adapted for SWE-agent + Qwen 3.5 35B
     timeout_s: int = 1800       # 30 minutes (was 600)
