@@ -6,8 +6,8 @@
 #SBATCH --job-name=vllm-qwen35
 #SBATCH --partition=gpmoo-a
 #SBATCH --nodelist=gpmoo-a1
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=120G
 #SBATCH --time=48:00:00
 #SBATCH --output=logs/vllm_%j.out
@@ -19,7 +19,7 @@ MODEL="${MODEL:-Qwen/Qwen3.5-35B}"
 PORT="${PORT:-8000}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_UTIL="${GPU_UTIL:-0.90}"
-TP="${TP:-4}"
+TP="${TP:-1}"
 
 echo "Starting vLLM server..."
 echo "  Model: $MODEL"
