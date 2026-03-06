@@ -13,6 +13,7 @@ from sweagent_bench.guidance.schema import RepoGuidance
 from sweagent_bench.kb.agents_md import AGENTS_MD_CHAR_BUDGET, render_agents_md
 from sweagent_bench.kb.builder import build_kb
 from sweagent_bench.kb.schema import RepoKB
+from sweagent_bench.llm.openai_compat import chat_completion
 from sweagent_bench.oracle.apply import apply_edits
 from sweagent_bench.oracle.diagnose import diagnose_failures
 from sweagent_bench.oracle.judge import evaluate_probe
@@ -21,11 +22,41 @@ from sweagent_bench.oracle.schema import Edit, OracleConfig, OracleState, Probe,
 from sweagent_bench.probes import run_all_probes
 
 
-MAX_EDITS_PER_ITERATION = 8
+MAX_EDITS_PER_ITERATION = 5
 RESERVED_CHAR_BUFFER = 640
 SOFT_CHAR_BUDGET = AGENTS_MD_CHAR_BUDGET - RESERVED_CHAR_BUFFER
-MIN_EDIT_SUPPORT_DEFAULT = 2
 ORACLE_PROBE_EXECUTION_MODE = "single_shot"
+TARGET_PROBES_PER_ITERATION = 10
+MAX_PROBE_TOPUP_ATTEMPTS = 3
+
+_EDIT_PRIORITIZER_SYSTEM = """\
+You are selecting the best AGENTS.md edits from candidate proposals.
+
+Return ONLY valid JSON with this shape:
+{
+    "selected_indices": [0, 4, 2],
+    "notes": "optional short rationale"
+}
+
+Rules:
+- Select up to {max_edits} candidates by index.
+- Prefer reusable repo-level guidance, minimal scope, and high-signal improvements.
+- Avoid duplicates/near-duplicates and avoid overly instance-specific suggestions.
+- Prefer edits that improve evidence-first localization, dependency tracing, and targeted validation.
+- Do not invent new indices.
+"""
+
+_EDIT_PRIORITIZER_USER = """\
+CURRENT AGENTS.MD:
+---
+{agents_md}
+---
+
+CANDIDATE EDITS (JSON array):
+{candidates_json}
+
+Select the top edits now.
+"""
 
 
 def _olog(msg: str) -> None:
@@ -216,13 +247,14 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         iter_stop_reason = ""
 
         t_probe_gen = time.perf_counter()
-        generation_prior = [
-            Probe(id=f"prior_{i}", task=task)
-            for i, task in enumerate(prior_probe_tasks)
-        ]
+        generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(prior_probe_tasks)]
         generated_probes = generate_probes(
-            kb, config.model, agents_md,
-            prior_probes=generation_prior, timeout_s=config.timeout_s,
+            kb,
+            config.model,
+            agents_md,
+            prior_probes=generation_prior,
+            timeout_s=config.timeout_s,
+            max_probes=TARGET_PROBES_PER_ITERATION,
         )
         deduped_probes: list[Probe] = []
         duplicate_probe_count = 0
@@ -234,13 +266,45 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             prior_probe_signatures.add(sig)
             prior_probe_tasks.append(probe.task)
             deduped_probes.append(probe)
+
+        topup_attempts = 0
+        while len(deduped_probes) < TARGET_PROBES_PER_ITERATION and topup_attempts < MAX_PROBE_TOPUP_ATTEMPTS:
+            remaining = TARGET_PROBES_PER_ITERATION - len(deduped_probes)
+            generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(prior_probe_tasks)]
+            topup_batch = generate_probes(
+                kb,
+                config.model,
+                agents_md,
+                prior_probes=generation_prior,
+                timeout_s=config.timeout_s,
+                max_probes=remaining,
+            )
+            if not topup_batch:
+                break
+            topup_attempts += 1
+            generated_probes.extend(topup_batch)
+            for probe in topup_batch:
+                sig = _probe_signature(probe.task)
+                if sig in prior_probe_signatures:
+                    duplicate_probe_count += 1
+                    continue
+                prior_probe_signatures.add(sig)
+                prior_probe_tasks.append(probe.task)
+                deduped_probes.append(probe)
+
+        if len(deduped_probes) < TARGET_PROBES_PER_ITERATION:
+            raise RuntimeError(
+                f"Failed to enforce {TARGET_PROBES_PER_ITERATION} probes "
+                f"(kept={len(deduped_probes)}, dropped={duplicate_probe_count})"
+            )
         _olog(
             f"Iteration {t}: generated {len(generated_probes)} probes in "
             f"{time.perf_counter() - t_probe_gen:.2f}s (pool={len(generated_probes)})"
         )
         _olog(
             f"Iteration {t}: probe dedup dropped={duplicate_probe_count} "
-            f"kept={len(deduped_probes)}"
+            f"kept={len(deduped_probes)} target={TARGET_PROBES_PER_ITERATION} "
+            f"topup_attempts={topup_attempts}"
         )
         if deduped_probes:
             probe_ids = ", ".join(p.id for p in deduped_probes)
@@ -273,6 +337,8 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             deduped_edits=deduped_edits,
             current_agents_md=agents_md,
             max_edits=MAX_EDITS_PER_ITERATION,
+            model=config.model,
+            timeout_s=config.timeout_s,
         )
         _olog(
             f"Iteration {t}: prioritized edits={len(edits)} "
@@ -469,111 +535,89 @@ def _prioritize_edits_for_iteration(
     deduped_edits: list[Edit],
     current_agents_md: str,
     max_edits: int,
+    model: str,
+    timeout_s: int,
 ) -> list[Edit]:
-    if not deduped_edits:
+    if not raw_edits:
         return []
 
-    action_weight = {
-        "modify": 4,
-        "strengthen": 3,
-        "remove": 2,
-        "add": 1,
-    }
+    candidates: list[dict] = []
+    for idx, edit in enumerate(raw_edits):
+        candidates.append(
+            {
+                "index": idx,
+                "section": edit.section,
+                "action": edit.action,
+                "content": edit.content,
+            }
+        )
 
-    freq_by_key: dict[tuple[str, str, str], int] = {}
-    for edit in raw_edits:
-        key = _edit_key(edit)
-        freq_by_key[key] = freq_by_key.get(key, 0) + 1
+    messages = [
+        {"role": "system", "content": _EDIT_PRIORITIZER_SYSTEM.format(max_edits=max_edits)},
+        {
+            "role": "user",
+            "content": _EDIT_PRIORITIZER_USER.format(
+                agents_md=current_agents_md,
+                candidates_json=json.dumps(candidates, ensure_ascii=False, indent=2),
+            ),
+        },
+    ]
 
-    min_support = MIN_EDIT_SUPPORT_DEFAULT
-    if len(deduped_edits) <= 3:
-        min_support = 1
+    selected_indices: list[int] = []
+    try:
+        raw = chat_completion(
+            model=model,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=1024,
+            timeout_s=timeout_s,
+        )
+        text = raw.strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        obj = json.loads(text)
+        idxs = obj.get("selected_indices", []) if isinstance(obj, dict) else []
+        if isinstance(idxs, list):
+            for v in idxs:
+                if isinstance(v, int):
+                    selected_indices.append(v)
+    except Exception:
+        selected_indices = []
 
-    at_or_over_soft_budget = len(current_agents_md) >= SOFT_CHAR_BUDGET
     selected: list[Edit] = []
     seen_keys: set[tuple[str, str, str]] = set()
 
-    ranked = sorted(
-        deduped_edits,
-        key=lambda e: (
-            freq_by_key.get(_edit_key(e), 1),
-            action_weight.get(e.action.strip().lower(), 0),
-            -len(e.content),
-        ),
-        reverse=True,
-    )
-
-    for edit in ranked:
-        key = _edit_key(edit)
-        support = freq_by_key.get(key, 1)
-        action = edit.action.strip().lower()
-
-        if key in seen_keys:
+    for idx in selected_indices:
+        if idx < 0 or idx >= len(raw_edits):
             continue
-
-        if _looks_overly_instance_specific(edit):
+        edit = raw_edits[idx]
+        key = (
+            edit.section.strip().lower(),
+            edit.action.strip().lower(),
+            " ".join(edit.content.strip().split()).lower(),
+        )
+        if not key[2] or key in seen_keys:
             continue
-
-        if support < min_support:
-            continue
-
-        if at_or_over_soft_budget and action == "add":
-            continue
-
         selected.append(edit)
         seen_keys.add(key)
         if len(selected) >= max_edits:
             break
 
     if not selected:
-        fallback_ranked = sorted(
-            deduped_edits,
-            key=lambda e: (
-                action_weight.get(e.action.strip().lower(), 0),
-                -len(e.content),
-            ),
-            reverse=True,
-        )
-        for edit in fallback_ranked:
-            key = _edit_key(edit)
-            action = edit.action.strip().lower()
-            if key in seen_keys:
-                continue
-            if _looks_overly_instance_specific(edit):
-                continue
-            if at_or_over_soft_budget and action == "add":
+        for edit in deduped_edits[:max_edits]:
+            key = (
+                edit.section.strip().lower(),
+                edit.action.strip().lower(),
+                " ".join(edit.content.strip().split()).lower(),
+            )
+            if not key[2] or key in seen_keys:
                 continue
             selected.append(edit)
             seen_keys.add(key)
-            if len(selected) >= min(max_edits, 2):
+            if len(selected) >= max_edits:
                 break
 
     return selected
-
-
-def _edit_key(edit: Edit) -> tuple[str, str, str]:
-    return (
-        edit.section.strip().lower(),
-        edit.action.strip().lower(),
-        " ".join(edit.content.strip().split()).lower(),
-    )
-
-
-def _looks_overly_instance_specific(edit: Edit) -> bool:
-    content = edit.content.strip()
-    lower = content.lower()
-
-    path_like = len(re.findall(r"\b[\w./-]+\.(?:py|txt|md|json|yaml|yml|ini|cfg)\b", content))
-    command_like = bool(re.search(r"\b(pytest|python manage\.py|grep|rg|tox|head\s+-\d+)\b", lower))
-    code_block_like = "```" in content or "def " in content or "class " in content
-
-    if code_block_like:
-        return True
-    if command_like and edit.action.strip().lower() == "add":
-        return True
-    if path_like >= 2 and edit.action.strip().lower() == "add":
-        return True
-    return False
 
 
 def _save_probe_results_summary(probe_results, path: Path) -> None:

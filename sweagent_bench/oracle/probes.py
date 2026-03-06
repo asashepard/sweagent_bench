@@ -24,14 +24,14 @@ Return ONLY a JSON array of probe objects with this shape:
 ]
 
 Rules:
-- 6-10 probes, diverse across bug-fix and test-failure tasks.
+- Return exactly {max_probes} probes, diverse across bug-fix and test-failure tasks.
 - Tasks must be concrete coding requests, not AGENTS/meta questions.
 - Each probe must include 2-4 expected behaviors.
 - Expected behaviors must emphasize: evidence-first localization, dependency tracing, minimal scoped edits, and targeted validation.
 - Every task must be patchable and executable by a tool-using coding runner (inspect files, run commands, propose code diff).
 - Avoid pure advisory/navigation-only tasks that do not naturally end in a code diff.
 - Avoid duplicates with prior tasks.
-- Maximum {max_probes} probes.
+- Exactly {max_probes} probes.
 """
 
 _PROBE_USER = """\
@@ -62,12 +62,28 @@ def _make_probe_id(task: str) -> str:
     return hashlib.sha256(task.encode("utf-8")).hexdigest()[:10]
 
 
-def _fallback_probes(kb: RepoKB, limit: int) -> list[Probe]:
-    tasks = [
-        f"A regression was introduced in {kb.repo}: fix the failing behavior with a minimal patch and validate with targeted tests.",
-        f"A recently changed code path in {kb.repo} now fails existing tests: localize the cause and submit a focused diff.",
-        f"A bug in a high-impact module in {kb.repo} causes incorrect output: trace dependencies, patch the root cause, and validate.",
+def _fallback_probe_task_pool(repo: str) -> list[str]:
+    return [
+        f"A regression in {repo} breaks a high-traffic request path; localize the root cause and submit a minimal patch with targeted validation.",
+        f"A recent change in {repo} introduced a failing test in core behavior; identify the exact break and provide a focused fix diff.",
+        f"A bug in {repo} causes incorrect output under edge inputs; trace dependency flow and patch only the root condition.",
+        f"A command-line entry flow in {repo} now behaves incorrectly after refactor; isolate the failing branch and fix with minimal scope.",
+        f"An import or initialization sequence in {repo} regressed; find the offending code path and submit a narrowly scoped patch.",
+        f"A configuration handling path in {repo} is now inconsistent; reproduce with targeted checks and apply a precise fix.",
+        f"A serialization/parsing path in {repo} regressed for specific input shape; localize the parser boundary and patch minimally.",
+        f"A validation guard in {repo} became too strict or too permissive; trace call sites and repair the guard condition only.",
+        f"A routing/dispatch decision in {repo} selects the wrong handler in a corner case; identify and fix the selector logic.",
+        f"A caching/state path in {repo} returns stale or invalid results; pinpoint invalidation logic and apply a focused correction.",
+        f"A version-compatibility branch in {repo} regressed after recent updates; localize conditional logic and patch minimally.",
+        f"A file/path normalization utility in {repo} now mishandles edge paths; reproduce quickly and fix only normalization behavior.",
+        f"An error-handling path in {repo} now swallows or misreports critical exceptions; patch the smallest relevant try/except logic.",
+        f"A lifecycle hook sequence in {repo} runs in the wrong order and causes a test failure; correct ordering with minimal edits.",
+        f"A dedup/filter step in {repo} is now too aggressive; locate comparison logic and restore intended behavior with targeted changes.",
     ]
+
+
+def _fallback_probes(kb: RepoKB, limit: int) -> list[Probe]:
+    tasks = _fallback_probe_task_pool(kb.repo)
     probes: list[Probe] = []
     for task in tasks[:limit]:
         probes.append(Probe(
@@ -147,7 +163,26 @@ def generate_probes(
         ))
         seen_tasks.add(task)
 
+    if len(probes) < max_probes:
+        for task in _fallback_probe_task_pool(kb.repo):
+            task = task.strip()
+            if not task or task in seen_tasks:
+                continue
+            probes.append(Probe(
+                id=_make_probe_id(task),
+                task=task,
+                expected_behaviors=[
+                    "Localizes likely files/functions before editing",
+                    "Applies a minimal scoped code change",
+                    "Runs targeted validation relevant to the change",
+                ],
+                rationale="Fallback top-up to enforce fixed probe count.",
+            ))
+            seen_tasks.add(task)
+            if len(probes) >= max_probes:
+                break
+
     if not probes:
         return _fallback_probes(kb, max_probes)
 
-    return probes
+    return probes[:max_probes]
