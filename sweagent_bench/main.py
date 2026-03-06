@@ -74,6 +74,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Oracle tuning iterations (default: 5)",
     )
     parser.add_argument(
+        "--oracle-probe-timeout", type=int, default=300,
+        help="Per-probe runner timeout during oracle tuning in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--oracle-probe-max-steps", type=int, default=8,
+        help="Max runner steps per oracle probe (default: 8)",
+    )
+    parser.add_argument(
         "--timeout", type=int, default=1800,
         help="Per-instance timeout in seconds (default: 1800)",
     )
@@ -132,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         oracle_model=args.oracle_model,
         conditions=args.conditions,
         oracle_iterations=args.oracle_iterations,
+        oracle_probe_timeout_s=args.oracle_probe_timeout,
+        oracle_probe_max_steps=args.oracle_probe_max_steps,
         timeout_s=args.timeout,
         step_limit=args.step_limit,
         api_base=api_base,
@@ -144,6 +154,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[main] Model: {config.model}")
     print(f"[main] Conditions: {config.conditions}")
     print(f"[main] API base: {api_base}")
+    print(
+        f"[main] Oracle probe runner: timeout={config.oracle_probe_timeout_s}s "
+        f"steps={config.oracle_probe_max_steps}"
+    )
     print(f"[main] Timeout: {config.timeout_s}s, Steps: {config.step_limit}")
     print(f"[main] Repos: {len(repos)}")
     if args.instance_ids_file:

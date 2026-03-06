@@ -58,6 +58,8 @@ class ExperimentConfig:
 
     # Oracle tuning hyperparams
     oracle_iterations: int = 5
+    oracle_probe_timeout_s: int = 300
+    oracle_probe_max_steps: int = 8
 
     # Runner settings — adapted for SWE-agent + Qwen 3.5 35B
     timeout_s: int = 1800       # 30 minutes (was 600)
@@ -237,6 +239,9 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 model=config.oracle_model or config.model,
                 iterations=oracle_iters,
                 timeout_s=config.timeout_s,
+                probe_timeout_s=config.oracle_probe_timeout_s,
+                probe_max_steps=config.oracle_probe_max_steps,
+                api_base=config.api_base,
                 output_dir=out_dir,
             )
             kb, best = run_oracle_loop(oc)

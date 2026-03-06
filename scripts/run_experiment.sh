@@ -25,6 +25,8 @@ IDS_FILE="${IDS_FILE:-ids/verified_mini_ids.txt}"
 TIMEOUT="${TIMEOUT:-1800}"
 STEP_LIMIT="${STEP_LIMIT:-50}"
 ORACLE_ITERS="${ORACLE_ITERS:-5}"
+ORACLE_PROBE_TIMEOUT="${ORACLE_PROBE_TIMEOUT:-300}"
+ORACLE_PROBE_MAX_STEPS="${ORACLE_PROBE_MAX_STEPS:-8}"
 
 # Parse CLI overrides
 DRY_RUN=""
@@ -55,6 +57,8 @@ echo "  Conditions:    $CONDITIONS"
 echo "  Instance IDs:  $IDS_FILE"
 echo "  Timeout:       ${TIMEOUT}s"
 echo "  Step limit:    $STEP_LIMIT"
+echo "  Oracle probe timeout: ${ORACLE_PROBE_TIMEOUT}s"
+echo "  Oracle probe max steps: $ORACLE_PROBE_MAX_STEPS"
 echo "  API base:      ${OPENAI_BASE_URL:-http://localhost:8000/v1}"
 echo "================================================"
 
@@ -75,6 +79,8 @@ python -m sweagent_bench.main \
     --instance-ids-file "$IDS_FILE" \
     --repos-config configs/repos_12.json \
     --oracle-iterations "$ORACLE_ITERS" \
+    --oracle-probe-timeout "$ORACLE_PROBE_TIMEOUT" \
+    --oracle-probe-max-steps "$ORACLE_PROBE_MAX_STEPS" \
     --timeout "$TIMEOUT" \
     --step-limit "$STEP_LIMIT" \
     $DRY_RUN

@@ -33,6 +33,34 @@ python -m vllm.entrypoints.openai.api_server \
   --host 0.0.0.0 --port 8000
 ```
 
+## SLURM Batch Runs
+
+Use the provided SLURM scripts with env-var overrides for clean, repeatable runs.
+
+```bash
+# Submit vLLM server job
+sbatch slurm/serve_vllm.sh
+
+# Submit experiment job (all defaults)
+sbatch slurm/run_experiment.sh
+
+# Submit experiment with overrides
+MODEL=Qwen/Qwen3.5-35B \
+OPENAI_BASE_URL=http://gpmoo-a1:8000/v1 \
+EXPERIMENT_ID=exp_oracle_runner_$(date +%Y%m%d_%H%M%S) \
+CONDITIONS="no_context static_kb oracle_tuned" \
+IDS_FILE=ids/verified_smoke_4_ids.txt \
+ORACLE_ITERS=3 \
+ORACLE_PROBE_TIMEOUT=180 \
+ORACLE_PROBE_MAX_STEPS=6 \
+TIMEOUT=1800 \
+STEP_LIMIT=50 \
+sbatch slurm/run_experiment.sh
+```
+
+`slurm/run_experiment.sh` forwards those values to `scripts/run_experiment.sh`,
+which now passes `--oracle-probe-timeout` and `--oracle-probe-max-steps` to the CLI.
+
 ## Output
 
 ```

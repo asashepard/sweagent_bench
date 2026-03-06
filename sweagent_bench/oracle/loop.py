@@ -212,11 +212,33 @@ def _evaluate_all_probes_detailed(
         try:
             t_probe = time.perf_counter()
             _olog(f"Probe {i+1}/{len(probes)} start id={probe.id}")
-            result = evaluate_probe(agents_md, probe, config.model, timeout_s=config.timeout_s)
+            result = evaluate_probe(
+                agents_md,
+                probe,
+                config.model,
+                repo=config.repo,
+                commit=config.commit,
+                timeout_s=config.timeout_s,
+                probe_timeout_s=config.probe_timeout_s,
+                probe_max_steps=config.probe_max_steps,
+                api_base=config.api_base,
+            )
             results.append(result)
+            runner_status = ""
+            runner_patch_source = ""
+            runner_patch_len = 0
+            if result.overall_notes:
+                status_match = re.search(r"runner_status=([^;|]+)", result.overall_notes)
+                source_match = re.search(r"runner_patch_source=([^;|]+)", result.overall_notes)
+                len_match = re.search(r"runner_patch_len=(\d+)", result.overall_notes)
+                runner_status = status_match.group(1).strip() if status_match else ""
+                runner_patch_source = source_match.group(1).strip() if source_match else ""
+                runner_patch_len = int(len_match.group(1)) if len_match else 0
             _olog(
                 f"Probe {i+1}/{len(probes)} complete in {time.perf_counter() - t_probe:.2f}s "
-                f"reviews={len(result.behavior_reviews)} edits={len(result.proposed_edits)}"
+                f"reviews={len(result.behavior_reviews)} edits={len(result.proposed_edits)} "
+                f"runner_status={runner_status} runner_patch_source={runner_patch_source} "
+                f"runner_patch_len={runner_patch_len}"
             )
         except Exception as exc:
             _olog(f"Probe {i+1}/{len(probes)} ERROR: {exc}")

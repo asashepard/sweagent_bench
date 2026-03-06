@@ -28,6 +28,7 @@ Rules:
 - Tasks must be concrete coding requests, not AGENTS/meta questions.
 - Each probe must include 2-4 expected behaviors.
 - Expected behaviors must emphasize: evidence-first localization, dependency tracing, minimal scoped edits, and targeted validation.
+- Tasks should be executable by a tool-using coding runner (inspect files, run commands, propose code diff).
 - Avoid duplicates with prior tasks.
 - Maximum {max_probes} probes.
 """

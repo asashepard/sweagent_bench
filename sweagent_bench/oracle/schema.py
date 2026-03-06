@@ -51,6 +51,9 @@ class OracleConfig:
     model: str
     iterations: int = 5
     timeout_s: int = 120
+    probe_timeout_s: int = 300
+    probe_max_steps: int = 8
+    api_base: str | None = None
     output_dir: str = ""
 
     def to_dict(self) -> dict:
