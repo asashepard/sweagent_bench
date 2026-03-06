@@ -78,8 +78,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Per-probe runner timeout during oracle tuning in seconds (default: 600)",
     )
     parser.add_argument(
-        "--oracle-probe-max-steps", type=int, default=16,
-        help="Max runner steps per oracle probe (default: 16)",
+        "--oracle-probe-max-steps", type=int, default=25,
+        help="Max runner steps per oracle probe (default: 25)",
     )
     parser.add_argument(
         "--timeout", type=int, default=1800,
