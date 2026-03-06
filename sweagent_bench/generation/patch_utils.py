@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 
@@ -24,15 +25,7 @@ def normalize_patch_text(patch: str) -> str:
 
 
 def extract_unified_diff(patch_text: str) -> str:
-    """Extract only the unified-diff portion from model output.
-
-    Rules:
-    - Start at first ``diff --git`` or ``--- a/`` line.
-    - Keep contiguous diff blocks, including multi-file patches.
-    - After at least one hunk starts, stop at the first clearly non-diff line.
-    - Remove hallucinated ``index <hash>..<hash> [mode]`` lines.
-    - Return text ending with exactly one trailing newline.
-    """
+    """Extract only the unified-diff portion from model output."""
     if not patch_text:
         return ""
 
@@ -102,7 +95,6 @@ def extract_unified_diff(patch_text: str) -> str:
                 break
             continue
 
-        # Non-diff material before any hunk: keep extraction bounded.
         break
 
     if not collected:
@@ -125,7 +117,6 @@ def _validate_diff_git_sections(patch: str) -> tuple[bool, str | None]:
         end = section_starts[idx + 1]
         section = patch[start:end]
         header = section.splitlines()[0] if section.splitlines() else f"section {idx + 1}"
-
         has_old = bool(re.search(r"(?m)^---\s+a/", section))
         has_new = bool(re.search(r"(?m)^\+\+\+\s+b/", section))
         has_hunk = bool(re.search(r"(?m)^@@\s+.*\s+@@", section))
@@ -138,6 +129,11 @@ def _validate_diff_git_sections(patch: str) -> tuple[bool, str | None]:
             return False, f"missing hunk header in section {idx + 1}: {header}"
 
     return True, None
+
+
+def _strict_hunk_count_validation_enabled() -> bool:
+    raw = os.environ.get("SWEAGENT_STRICT_HUNK_COUNTS", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _validate_hunk_header_counts(patch: str) -> tuple[bool, str | None]:
@@ -172,7 +168,6 @@ def _validate_hunk_header_counts(patch: str) -> tuple[bool, str | None]:
                 old_count += 1
                 new_count += 1
             elif cur.startswith("\\"):
-                # e.g. '\\ No newline at end of file' does not affect counts
                 pass
             else:
                 break
@@ -188,17 +183,11 @@ def _validate_hunk_header_counts(patch: str) -> tuple[bool, str | None]:
 
 
 def validate_diff_format(patch: str) -> tuple[bool, str | None]:
-    """Validate that patch looks like a minimally valid unified diff.
-
-    Requirements for non-empty patch:
-    - contains file headers (--- a/ and +++ b/)
-    - contains at least one hunk header (@@ ... @@)
-    """
+    """Validate that patch looks like a minimally valid unified diff."""
     if not patch or not patch.strip():
         return True, None
 
     has_diff_git = bool(re.search(r"(?m)^diff --git\s+", patch))
-
     has_file_headers = bool(
         re.search(r"(?m)^---\s+a/", patch) and re.search(r"(?m)^\+\+\+\s+b/", patch)
     )
@@ -207,9 +196,10 @@ def validate_diff_format(patch: str) -> tuple[bool, str | None]:
     if not has_file_headers or not has_hunk:
         return False, "invalid diff format"
 
-    ok_counts, err_counts = _validate_hunk_header_counts(patch)
-    if not ok_counts:
-        return False, err_counts
+    if _strict_hunk_count_validation_enabled():
+        ok_counts, err_counts = _validate_hunk_header_counts(patch)
+        if not ok_counts:
+            return False, err_counts
 
     if has_diff_git:
         ok_sections, err_sections = _validate_diff_git_sections(patch)
@@ -248,7 +238,7 @@ def extract_diff(text: str) -> str:
     if matches:
         for match in reversed(matches):
             if "---" in match or "diff --git" in match:
-                return extract_unified_diff(match)
+                return match.strip()
 
     # 2. Raw unfenced diff starting with "diff --git"
     lines = text.split("\n")
@@ -257,12 +247,12 @@ def extract_diff(text: str) -> str:
         if line.startswith("diff --git "):
             last_raw_start = i
     if last_raw_start is not None:
-        return extract_unified_diff("\n".join(lines[last_raw_start:]))
+        return "\n".join(lines[last_raw_start:]).strip()
 
     # 3. Fallback: raw "--- " header
     for i, line in enumerate(lines):
         if line.startswith("--- "):
-            return extract_unified_diff("\n".join(lines[i:]))
+            return "\n".join(lines[i:]).strip()
 
     return ""
 
@@ -310,7 +300,7 @@ def _is_noop_diff(patch: str) -> bool:
 
 def sanitize_patch_for_preds(patch: str) -> tuple[str, bool]:
     candidate = _strip_to_first_fenced_diff_block(patch or "")
-    sanitized = extract_unified_diff(candidate)
+    sanitized = _slice_from_first_diff_start(candidate)
     is_noop = _is_noop_diff(sanitized)
     if is_noop:
         return "", True

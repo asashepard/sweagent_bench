@@ -41,15 +41,6 @@ def _elog(msg: str) -> None:
     print(f"[{ts}] [experiment] {msg}", flush=True)
 
 
-def _build_preds_record(instance_id: str, model: str, patch: str) -> dict:
-    return {
-        "instance_id": instance_id,
-        "model_name_or_path": model,
-        "patch": patch,
-        "model_patch": patch,
-    }
-
-
 # ── data classes ───────────────────────────────────────────────
 
 
@@ -387,8 +378,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                             f"Condition {condition}: iid={iid} runner status={run_meta.get('status')} "
                             f"patch_source={run_meta.get('patch_source')} elapsed={run_meta.get('elapsed_s', 0.0):.2f}s"
                         )
-                        # Accept either model_patch or patch, preferring model_patch when present.
-                        patch = run_meta.get("model_patch") if "model_patch" in run_meta else run_meta.get("patch", "")
+                        patch = run_meta.get("patch", "")
                         _elog(
                             f"Condition {condition}: iid={iid} raw patch length={len(patch)}"
                         )
@@ -401,7 +391,6 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                             f"Condition {condition}: iid={iid} sanitized patch length={len(patch)} no_op={patch_is_noop}"
                         )
 
-                        # Normalize line endings and validate minimal diff structure
                         normalized_patch, patch_format_error = normalize_and_validate_patch(patch)
                         if patch_format_error:
                             _elog(
@@ -428,30 +417,26 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                         "error": str(exc),
                     }
 
-                record = _build_preds_record(iid, config.model, patch)
-                with cond_preds_path.open("a", encoding="utf-8", newline="\n") as f:
+                record = {
+                    "instance_id": iid,
+                    "model_name_or_path": config.model,
+                    "patch": patch,
+                    "model_patch": patch,
+                }
+                with cond_preds_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
                 _elog(f"Condition {condition}: iid={iid} appended preds record")
 
                 usage = run_meta.get("token_usage", {}) if isinstance(run_meta, dict) else {}
-                reported_tokens = run_meta.get("reported_tokens", {}) if isinstance(run_meta, dict) else {}
-                estimated_tokens = run_meta.get("estimated_tokens", {}) if isinstance(run_meta, dict) else {}
                 metrics_record = {
                     "instance_id": iid,
                     "repo": repo,
                     "condition": condition,
                     "elapsed_s": float(run_meta.get("elapsed_s", 0.0) or 0.0),
-                    "elapsed_s_total": float(run_meta.get("elapsed_s_total", run_meta.get("elapsed_s", 0.0)) or 0.0),
-                    "elapsed_s_llm": float(run_meta.get("elapsed_s_llm", 0.0) or 0.0),
-                    "elapsed_s_tools": float(run_meta.get("elapsed_s_tools", 0.0) or 0.0),
-                    "elapsed_s_eval": float(run_meta.get("elapsed_s_eval", 0.0) or 0.0),
                     "patch_non_empty": bool(patch and patch.strip()),
                     "status": run_meta.get("status", "ok"),
                     "error": run_meta.get("error"),
                     "patch_source": run_meta.get("patch_source", "empty"),
-                    "steps_total": int(run_meta.get("steps_total", 0) or 0),
-                    "steps_actionable": int(run_meta.get("steps_actionable", 0) or 0),
-                    "steps_non_actionable": int(run_meta.get("steps_non_actionable", 0) or 0),
                     "fallback_single_shot_used": bool(run_meta.get("fallback_single_shot_used", False)),
                     "fallback_single_shot_patch_len": int(run_meta.get("fallback_single_shot_patch_len", 0) or 0),
                     "fallback_single_shot_raw_len": int(run_meta.get("fallback_single_shot_raw_len", 0) or 0),
@@ -461,28 +446,22 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                     "stall_type": run_meta.get("stall_type"),
                     "stall_action": run_meta.get("stall_action"),
                     "stall_repeat_count": int(run_meta.get("stall_repeat_count", 0) or 0),
-                    "stall_breaker_used": bool(run_meta.get("stall_breaker_used", False)),
-                    "stall_breaker_command": run_meta.get("stall_breaker_command"),
-                    "extra_blocks_ignored": int(run_meta.get("extra_blocks_ignored", 0) or 0),
-                    "chars_prompt": int(run_meta.get("chars_prompt", 0) or 0),
-                    "chars_completion": int(run_meta.get("chars_completion", 0) or 0),
-                    "token_usage_source": run_meta.get("token_usage_source", "estimated"),
+                    "repeated_command_stall_count": int(run_meta.get("repeated_command_stall_count", 0) or 0),
+                    "debug_enabled": bool(run_meta.get("debug_enabled", False)),
+                    "debug_dir": run_meta.get("debug_dir"),
+                    "assistant_step_artifacts": int(run_meta.get("assistant_step_artifacts", 0) or 0),
+                    "bash_step_artifacts": int(run_meta.get("bash_step_artifacts", 0) or 0),
+                    "no_bash_block_count": int(run_meta.get("no_bash_block_count", 0) or 0),
+                    "empty_bash_block_count": int(run_meta.get("empty_bash_block_count", 0) or 0),
+                    "non_actionable_reason_counts": run_meta.get(
+                        "non_actionable_reason_counts",
+                        {"no_bash_block": 0, "empty_bash_block": 0},
+                    ),
                     "token_usage": {
                         "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
                         "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
                         "total_tokens": int(usage.get("total_tokens", 0) or 0),
                     },
-                    "reported_tokens": {
-                        "prompt_tokens": int(reported_tokens.get("prompt_tokens", 0) or 0),
-                        "completion_tokens": int(reported_tokens.get("completion_tokens", 0) or 0),
-                        "total_tokens": int(reported_tokens.get("total_tokens", 0) or 0),
-                    },
-                    "estimated_tokens": {
-                        "prompt_tokens": int(estimated_tokens.get("prompt_tokens", 0) or 0),
-                        "completion_tokens": int(estimated_tokens.get("completion_tokens", 0) or 0),
-                        "total_tokens": int(estimated_tokens.get("total_tokens", 0) or 0),
-                    },
-                    "step_records": run_meta.get("step_records", []),
                 }
                 with cond_metrics_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(metrics_record, sort_keys=True, ensure_ascii=False) + "\n")
@@ -540,27 +519,11 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         )
 
         resolved = 0
-        unresolved = 0
-        errors = 0
-        completed = 0
-        empty_patches = 0
-        report_path = None
         load_error = None
         try:
-            from sweagent_bench.evaluation.summarize import compute_rate, load_instance_records, load_results_details
+            from sweagent_bench.evaluation.summarize import compute_rate, load_results
 
-            details = load_results_details(RESULTS_DIR / run_id)
-            resolved = int(details.get("resolved", 0) or 0)
-            unresolved = int(details.get("unresolved", 0) or 0)
-            errors = int(details.get("errors", 0) or 0)
-            completed = int(details.get("completed", 0) or 0)
-            empty_patches = int(details.get("empty_patches", 0) or 0)
-            report_path = details.get("report_path")
-
-            # Propagate harness per-instance outcomes into metrics file when available.
-            eval_instance_records = load_instance_records(RESULTS_DIR / run_id)
-            _merge_eval_outcomes_into_metrics(cond_metrics_path, eval_instance_records)
-
+            resolved, _harness_total = load_results(RESULTS_DIR / run_id)
             rate = compute_rate(resolved, expected_total)
             _elog(
                 f"Condition {condition}: evaluation results loaded resolved={resolved} "
@@ -575,10 +538,6 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         eval_results[condition] = {
             "run_id": run_id,
             "resolved": resolved,
-            "unresolved": unresolved,
-            "errors": errors,
-            "completed": completed,
-            "empty_patches": empty_patches,
             "total": expected_total,
             "attempted": expected_total,
             "rate": rate,
@@ -586,8 +545,6 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             "instance_metrics_path": str(cond_metrics_path),
             "generation_metrics": generation_metrics,
         }
-        if report_path:
-            eval_results[condition]["harness_report_path"] = report_path
         if load_error is not None:
             eval_results[condition]["error"] = load_error
 
@@ -684,24 +641,11 @@ def _collect_condition_generation_stats(
         "completion_tokens": 0,
         "total_tokens": 0,
     }
-    reported_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    estimated_tokens = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    steps_total = 0
-    steps_actionable = 0
-    steps_non_actionable = 0
-    elapsed_s_llm = 0.0
-    elapsed_s_tools = 0.0
-    elapsed_s_eval = 0.0
-    chars_prompt = 0
-    chars_completion = 0
-    token_usage_source_counts: dict[str, int] = {"reported": 0, "estimated": 0}
 
     for iid in target_ids:
         metric = metrics_by_id.get(iid)
         pred = preds_by_id.get(iid, {})
-        patch_text = ""
-        if isinstance(pred, dict):
-            patch_text = pred.get("model_patch") if "model_patch" in pred else pred.get("patch", "")
+        patch_text = pred.get("model_patch", "") if isinstance(pred, dict) else ""
 
         if metric is not None:
             patch_non_empty_i = bool(metric.get("patch_non_empty"))
@@ -710,26 +654,6 @@ def _collect_condition_generation_stats(
             token_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
             token_usage["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
             token_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
-            rep = metric.get("reported_tokens", {}) if isinstance(metric, dict) else {}
-            est = metric.get("estimated_tokens", {}) if isinstance(metric, dict) else {}
-            reported_tokens["prompt_tokens"] += int(rep.get("prompt_tokens", 0) or 0)
-            reported_tokens["completion_tokens"] += int(rep.get("completion_tokens", 0) or 0)
-            reported_tokens["total_tokens"] += int(rep.get("total_tokens", 0) or 0)
-            estimated_tokens["prompt_tokens"] += int(est.get("prompt_tokens", 0) or 0)
-            estimated_tokens["completion_tokens"] += int(est.get("completion_tokens", 0) or 0)
-            estimated_tokens["total_tokens"] += int(est.get("total_tokens", 0) or 0)
-
-            steps_total += int(metric.get("steps_total", 0) or 0)
-            steps_actionable += int(metric.get("steps_actionable", 0) or 0)
-            steps_non_actionable += int(metric.get("steps_non_actionable", 0) or 0)
-            elapsed_s_llm += float(metric.get("elapsed_s_llm", 0.0) or 0.0)
-            elapsed_s_tools += float(metric.get("elapsed_s_tools", 0.0) or 0.0)
-            elapsed_s_eval += float(metric.get("elapsed_s_eval", 0.0) or 0.0)
-            chars_prompt += int(metric.get("chars_prompt", 0) or 0)
-            chars_completion += int(metric.get("chars_completion", 0) or 0)
-            src = str(metric.get("token_usage_source", "") or "")
-            if src in token_usage_source_counts:
-                token_usage_source_counts[src] += 1
 
             status = str(metric.get("status", "") or "")
             if status == "missing_image":
@@ -774,48 +698,5 @@ def _collect_condition_generation_stats(
         "patch_source_counts": patch_source_counts,
         "elapsed_s": elapsed_s,
         "mean_elapsed_s": (elapsed_s / attempted) if attempted else 0.0,
-        "elapsed_s_llm": elapsed_s_llm,
-        "elapsed_s_tools": elapsed_s_tools,
-        "elapsed_s_eval": elapsed_s_eval,
-        "steps_total": steps_total,
-        "steps_actionable": steps_actionable,
-        "steps_non_actionable": steps_non_actionable,
-        "chars_prompt": chars_prompt,
-        "chars_completion": chars_completion,
-        "token_usage_source_counts": token_usage_source_counts,
         "token_usage": token_usage,
-        "reported_tokens": reported_tokens,
-        "estimated_tokens": estimated_tokens,
     }
-
-
-def _merge_eval_outcomes_into_metrics(metrics_path: Path, eval_records: list[dict]) -> None:
-    """Merge harness per-instance eval outcomes into metrics jsonl.
-
-    Adds fields to each metrics record when available:
-    - eval_resolved
-    - eval_passed
-    - eval_status
-    - eval_error
-    """
-    if not metrics_path.exists() or not eval_records:
-        return
-
-    eval_by_id: dict[str, dict] = {}
-    for rec in eval_records:
-        iid = rec.get("instance_id")
-        if isinstance(iid, str) and iid:
-            eval_by_id[iid] = rec
-
-    merged_lines: list[str] = []
-    for rec in read_jsonl(metrics_path):
-        iid = rec.get("instance_id")
-        eval_rec = eval_by_id.get(iid) if isinstance(iid, str) else None
-        if eval_rec is not None:
-            rec["eval_resolved"] = bool(eval_rec.get("resolved", False))
-            rec["eval_passed"] = bool(eval_rec.get("passed", False))
-            rec["eval_status"] = eval_rec.get("status")
-            rec["eval_error"] = eval_rec.get("error") or eval_rec.get("error_message")
-        merged_lines.append(json.dumps(rec, sort_keys=True, ensure_ascii=False))
-
-    metrics_path.write_text("\n".join(merged_lines) + "\n", encoding="utf-8", newline="\n")

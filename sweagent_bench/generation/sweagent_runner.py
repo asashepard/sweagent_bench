@@ -33,8 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sweagent_bench.generation.patch_utils import extract_diff, sanitize_patch_for_preds
-from sweagent_bench.llm.openai_compat import ContextLengthError, chat_completion, chat_completion_with_metadata
-from sweagent_bench.utils.tokens import TokenUsageTracker
+from sweagent_bench.llm.openai_compat import ContextLengthError, chat_completion
 
 
 # ── Constants ──────────────────────────────────────────────────
@@ -43,22 +42,9 @@ DEFAULT_TIMEOUT_S = 1800      # 30 minutes per instance
 DEFAULT_MAX_STEPS = 50        # agent loop iterations
 INPUT_SLACK_TOKENS = 1024     # never trim to exact boundary
 DEFAULT_MAX_OUTPUT_TOKENS = 512   # single-shot fallback
-AGENT_MAX_TOKENS = 2048           # per-turn budget in the agent loop
+AGENT_MAX_TOKENS = 4096           # per-turn budget in the agent loop
 CMD_TIMEOUT_S = 120               # per-command timeout
 STALL_THRESHOLD = 3               # consecutive identical commands → stall
-PER_COMMAND_OBS_CAP = 4000        # per-command observation cap for message appends
-STRICT_BASH_MODE_DEFAULT = True
-PATCH_MODE_DEFAULT = "git_diff"
-ACTIONABLE_NUDGE = (
-    "Your next message MUST be only one bash block, no prose. "
-    "Run ONE command that moves the task forward."
-)
-STALL_BREAKER_RECOVERY_COMMANDS = [
-    'rg -n "<keyword>" -S . | head',
-    'pytest -q <failing test> -k <keyword>',
-    "git diff",
-    "apply_patch <<'PATCH' ... PATCH",
-]
 
 
 def _rlog(msg: str) -> None:
@@ -112,9 +98,7 @@ AGENT_USER_TEMPLATE = """\
 {tree}
 ```
 {guidance_block}
-Fix this issue. Start by exploring the relevant code.
-Each response MUST contain exactly one ```bash block and no prose.
-When done, run `git diff` to verify changes; patch is collected automatically."""
+Fix this issue. Start by exploring the relevant code, then submit a ```diff block with your patch."""
 
 
 # ── Agent helpers ─────────────────────────────────────────────
@@ -124,92 +108,21 @@ def _is_debug() -> bool:
     return os.environ.get("SWEAGENT_BENCH_DEBUG", "") == "1"
 
 
-def _debug_write(debug_dir: Path | None, filename: str, content: str) -> None:
+def _debug_write(debug_dir: Path | None, filename: str, content: str) -> bool:
     """Write a debug artifact file (no-op when *debug_dir* is None)."""
     if debug_dir is None:
-        return
+        return False
     try:
         debug_dir.mkdir(parents=True, exist_ok=True)
         (debug_dir / filename).write_text(content, encoding="utf-8")
+        return True
     except Exception:
-        pass  # never let debug I/O crash the pipeline
+        return False  # never let debug I/O crash the pipeline
 
 
 def _strip_think_markers(text: str) -> str:
     """Remove literal ``<think>`` / ``</think>`` markers, keep content."""
     return text.replace("<think>", "").replace("</think>", "")
-
-
-def _truncate_head_tail(text: str, max_len: int, head: int, tail: int) -> str:
-    """Truncate text by keeping head+tail with an explicit middle marker."""
-    if len(text) <= max_len:
-        return text
-    return text[:head] + "\n\n... [truncated] ...\n\n" + text[-tail:]
-
-
-def _trim_messages(messages: list[dict], max_turns: int = 8) -> list[dict]:
-    """Keep system + initial task statement + latest conversation turns.
-
-    Policy:
-    - Preserve first system message if present.
-    - Preserve first user message after system (task statement).
-    - Keep only latest ``max_turns * 2`` remaining user/assistant messages.
-    """
-    if not messages:
-        return messages
-
-    first_system = None
-    rest_after_system: list[dict]
-    if messages and messages[0].get("role") == "system":
-        first_system = messages[0]
-        rest_after_system = messages[1:]
-    else:
-        rest_after_system = messages[:]
-
-    task_message = None
-    remainder: list[dict]
-    if rest_after_system and rest_after_system[0].get("role") == "user":
-        task_message = rest_after_system[0]
-        remainder = rest_after_system[1:]
-    else:
-        remainder = rest_after_system
-
-    max_tail_messages = max(0, max_turns * 2)
-    tail = remainder[-max_tail_messages:] if max_tail_messages else []
-
-    trimmed: list[dict] = []
-    if first_system is not None:
-        trimmed.append(first_system)
-    if task_message is not None:
-        trimmed.append(task_message)
-    trimmed.extend(tail)
-    return trimmed
-
-
-def _get_agent_max_tokens() -> int:
-    """Get per-step completion budget from env, defaulting to 2048."""
-    raw = os.environ.get("SWEAGENT_MAX_TOKENS", "").strip()
-    if not raw:
-        return AGENT_MAX_TOKENS
-    try:
-        val = int(raw)
-        if val > 0:
-            return val
-    except ValueError:
-        pass
-    return AGENT_MAX_TOKENS
-
-
-def _is_install_blocked_command(cmd: str) -> bool:
-    """Return True if command should be blocked unless install override is enabled."""
-    if os.environ.get("SWEAGENT_ALLOW_INSTALL", "") == "1":
-        return False
-    norm = cmd.strip().lower()
-    if norm.startswith("pip install"):
-        return True
-    if norm.startswith("python setup.py"):
-        return True
-    return False
 
 
 def _build_agent_messages(
@@ -251,79 +164,6 @@ def _parse_fenced_blocks(text: str) -> list[tuple[str, str]]:
     return re.findall(r"```(\w*)\s*\n(.*?)```", text, re.DOTALL)
 
 
-def _extract_non_empty_commands(block_content: str) -> list[str]:
-    commands: list[str] = []
-    for raw in block_content.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            continue
-        commands.append(line)
-    return commands
-
-
-def _select_actionable_bash_block(
-    blocks: list[tuple[str, str]],
-    *,
-    strict_mode: bool,
-) -> dict:
-    """Select one actionable bash block and report strict-mode diagnostics."""
-    bash_blocks = [content for lang, content in blocks if lang.lower() in _BASH_FENCE_LANGS]
-    actionable = [content for content in bash_blocks if _extract_non_empty_commands(content)]
-
-    if not strict_mode:
-        if not actionable:
-            return {
-                "actionable": False,
-                "reason": "no_actionable_bash",
-                "nudge": ACTIONABLE_NUDGE,
-                "extra_blocks_ignored": 0,
-                "commands": [],
-            }
-        selected = actionable[0]
-        return {
-            "actionable": True,
-            "reason": None,
-            "nudge": None,
-            "extra_blocks_ignored": max(0, len(actionable) - 1),
-            "commands": _extract_non_empty_commands(selected),
-        }
-
-    if len(actionable) == 0:
-        return {
-            "actionable": False,
-            "reason": "no_bash_block" if not bash_blocks else "empty_bash_block",
-            "nudge": ACTIONABLE_NUDGE,
-            "extra_blocks_ignored": 0,
-            "commands": [],
-        }
-
-    selected = actionable[0]
-    return {
-        "actionable": True,
-        "reason": None,
-        "nudge": None,
-        "extra_blocks_ignored": max(0, len(actionable) - 1),
-        "commands": _extract_non_empty_commands(selected),
-    }
-
-
-def _build_stall_breaker_nudge() -> tuple[str, str]:
-    chosen = "git diff"
-    content = (
-        "Stall detected: you repeated the same command 3 times. "
-        "Your next message MUST be only one bash block, no prose. "
-        "Choose ONE recovery command from this list:\n"
-        f"- {STALL_BREAKER_RECOVERY_COMMANDS[0]}\n"
-        f"- {STALL_BREAKER_RECOVERY_COMMANDS[1]}\n"
-        f"- {STALL_BREAKER_RECOVERY_COMMANDS[2]}\n"
-        f"- {STALL_BREAKER_RECOVERY_COMMANDS[3]}\n"
-        f"Use this now: {chosen}"
-    )
-    return content, chosen
-
-
 _DIFF_FENCE_LANGS = {"diff", "patch"}
 _BASH_FENCE_LANGS = {"bash", "sh"}
 
@@ -362,13 +202,6 @@ def _extract_last_diff_block(text: str) -> str:
 
 def _execute_bash(cmd: str, cwd: Path) -> str:
     """Run a bash command in the worktree and return combined output."""
-    if _is_install_blocked_command(cmd):
-        return (
-            "[blocked command] Installation commands are disabled in this loop "
-            "(pip install / python setup.py). Proceed without installing packages. "
-            "Set SWEAGENT_ALLOW_INSTALL=1 to allow installs."
-        )
-
     try:
         proc = subprocess.run(
             ["bash", "-c", cmd],
@@ -386,7 +219,7 @@ def _execute_bash(cmd: str, cwd: Path) -> str:
             output += f"\n[exit code: {proc.returncode}]"
         # Truncate very long outputs to stay within context budget
         if len(output) > 10_000:
-            output = _truncate_head_tail(output, max_len=10_000, head=5000, tail=3000)
+            output = output[:5000] + "\n\n... [truncated] ...\n\n" + output[-3000:]
         return output.strip() or "(no output)"
     except subprocess.TimeoutExpired:
         return f"[command timed out after {CMD_TIMEOUT_S}s]"
@@ -421,8 +254,6 @@ def _run_agent_loop(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     api_base: str | None = None,
     debug_dir: Path | None = None,
-    strict_bash_mode: bool = STRICT_BASH_MODE_DEFAULT,
-    patch_mode: str = PATCH_MODE_DEFAULT,
 ) -> tuple[str, dict]:
     """Run the iterative mini-swe-agent loop.
 
@@ -435,32 +266,28 @@ def _run_agent_loop(
 
     info: dict = {
         "steps_taken": 0,
-        "steps_total": 0,
-        "steps_actionable": 0,
-        "steps_non_actionable": 0,
-        "non_actionable_count": 0,
         "stall_detected": False,
         "stall_type": None,
         "stall_repeat_count": 0,
-        "stall_breaker_used": False,
-        "stall_breaker_command": None,
+        "repeated_command_stall_count": 0,
         "status": "ok",
         "error": None,
         "diff_block_found": False,
         "git_diff_non_empty": False,
-        "extra_blocks_ignored": 0,
-        "last_nudge": None,
-        "elapsed_s_llm": 0.0,
-        "elapsed_s_tools": 0.0,
-        "elapsed_s_eval": 0.0,
-        "chars_prompt": 0,
-        "chars_completion": 0,
-        "step_records": [],
+        "debug_enabled": bool(debug_dir is not None),
+        "debug_dir": str(debug_dir) if debug_dir is not None else None,
+        "assistant_step_artifacts": 0,
+        "bash_step_artifacts": 0,
+        "no_bash_block_count": 0,
+        "empty_bash_block_count": 0,
+        "non_actionable_reason_counts": {
+            "no_bash_block": 0,
+            "empty_bash_block": 0,
+        },
     }
 
     deadline = time.perf_counter() + timeout_s
     recent_cmds: list[str] = []
-    token_tracker = TokenUsageTracker()
     _rlog(
         f"Agent loop start iid={instance.get('instance_id')} repo={instance.get('repo')} "
         f"max_steps={max_steps} timeout_s={timeout_s}"
@@ -475,7 +302,6 @@ def _run_agent_loop(
             break
 
         info["steps_taken"] = step + 1
-        info["steps_total"] = step + 1
         _rlog(f"Step {step+1}/{max_steps} start iid={instance.get('instance_id')}")
 
         # ── LLM call (env save/restore for api_base) ──
@@ -486,31 +312,16 @@ def _run_agent_loop(
 
             remaining = max(30, int(deadline - time.perf_counter()))
             t_llm = time.perf_counter()
-            messages = _trim_messages(messages, max_turns=8)
-            max_tokens = _get_agent_max_tokens()
-            prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
-            response = chat_completion_with_metadata(
+            response_text = chat_completion(
                 model=model,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=max_tokens,
+                max_tokens=AGENT_MAX_TOKENS,
                 timeout_s=min(remaining, 300),
             )
-            response_text = str(response.get("content", "") or "")
-            usage = response.get("usage", {}) if isinstance(response, dict) else {}
-            llm_elapsed = time.perf_counter() - t_llm
-            info["elapsed_s_llm"] += llm_elapsed
-            info["chars_prompt"] += prompt_chars
-            info["chars_completion"] += len(response_text)
-
-            token_step = token_tracker.add_step(
-                prompt_text="\n".join(str(m.get("content", "")) for m in messages),
-                completion_text=response_text,
-                usage=usage,
-            )
             _rlog(
-                f"Step {step+1}: LLM response received in {llm_elapsed:.2f}s "
-                f"chars={len(response_text)} max_tokens={max_tokens}"
+                f"Step {step+1}: LLM response received in {time.perf_counter() - t_llm:.2f}s "
+                f"chars={len(response_text)}"
             )
         except ContextLengthError as e:
             info["status"] = "context_length_error"
@@ -530,7 +341,8 @@ def _run_agent_loop(
                     os.environ.pop("OPENAI_BASE_URL", None)
 
         # ── Debug: write raw assistant response ──
-        _debug_write(debug_dir, f"assistant_step_{step}.txt", response_text)
+        if _debug_write(debug_dir, f"assistant_step_{step}.txt", response_text):
+            info["assistant_step_artifacts"] += 1
 
         # ── Pre-process: strip <think>/</ think> markers, keep content ──
         cleaned = _strip_think_markers(response_text)
@@ -539,24 +351,11 @@ def _run_agent_loop(
         blocks = _parse_fenced_blocks(cleaned)
         _rlog(f"Step {step+1}: parsed fenced blocks count={len(blocks)}")
 
-        step_record = {
-            "step": step + 1,
-            "command": None,
-            "command_runtime_s": 0.0,
-            "llm_latency_s": float(llm_elapsed),
-            "completion_chars": len(response_text),
-            "non_actionable": False,
-            "extra_blocks_ignored": 0,
-            "token_usage_source": token_step.get("source"),
-            "reported_tokens": token_step.get("reported", {}),
-            "estimated_tokens": token_step.get("estimated", {}),
-        }
-
         # Check for diff/patch submission (last block wins)
         diff_candidate = _extract_last_diff_block(cleaned)
         has_bash = any(lang.lower() in _BASH_FENCE_LANGS for lang, _ in blocks)
 
-        if patch_mode != "git_diff" and diff_candidate and ("diff --git" in diff_candidate or "--- " in diff_candidate):
+        if diff_candidate and ("diff --git" in diff_candidate or "--- " in diff_candidate):
             info["diff_block_found"] = True
             messages.append({"role": "assistant", "content": response_text})
             _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", diff_candidate)
@@ -564,22 +363,21 @@ def _run_agent_loop(
                 f"Step {step+1}: extracted diff candidate len={len(diff_candidate)} "
                 f"returning patch"
             )
-            info.update(token_tracker.export())
             return diff_candidate, info
 
-        # ── Execute one actionable bash block (strict by default) ──
-        selection = _select_actionable_bash_block(blocks, strict_mode=strict_bash_mode)
-        info["extra_blocks_ignored"] += int(selection.get("extra_blocks_ignored", 0) or 0)
-        step_record["extra_blocks_ignored"] = int(selection.get("extra_blocks_ignored", 0) or 0)
+        # ── Execute bash blocks ──
+        bash_blocks = [
+            content for lang, content in blocks
+            if lang.lower() in _BASH_FENCE_LANGS
+        ]
+        bash_contents = [content for content in bash_blocks if content.strip()]
 
-        if selection.get("actionable"):
-            info["steps_actionable"] += 1
-            cmds = selection.get("commands", [])
-            _rlog(f"Step {step+1}: executing 1 bash block with {len(cmds)} command(s)")
+        if bash_contents:
+            _rlog(f"Step {step+1}: executing {len(bash_contents)} bash command block(s)")
             observations: list[str] = []
-            step_record_appended = False
-            observation_appended = False
-            for cmd in cmds:
+            stalled = False
+            for cmd_text in bash_contents:
+                cmd = cmd_text.strip()
                 # Stall detection
                 recent_cmds.append(cmd)
                 if len(recent_cmds) > STALL_THRESHOLD:
@@ -591,83 +389,74 @@ def _run_agent_loop(
                     info["stall_detected"] = True
                     info["stall_type"] = "repeated_command"
                     info["stall_repeat_count"] = STALL_THRESHOLD
-                    info["steps_non_actionable"] += 1
-                    info["non_actionable_count"] += 1
-                    step_record["non_actionable"] = True
+                    info["repeated_command_stall_count"] += 1
                     _rlog(
                         f"Step {step+1}: stall detected repeated command x{STALL_THRESHOLD}: {cmd}"
                     )
-                    nudge, chosen = _build_stall_breaker_nudge()
-                    info["stall_breaker_used"] = True
-                    info["stall_breaker_command"] = chosen
-                    info["last_nudge"] = nudge
-                    messages.append({"role": "assistant", "content": response_text})
-                    messages.append({"role": "user", "content": nudge})
-                    step_record["command"] = cmd
-                    info["step_records"].append(step_record)
-                    step_record_appended = True
+                    stalled = True
                     break
 
                 _rlog(f"Step {step+1}: running command: {cmd}")
                 t_cmd = time.perf_counter()
                 output = _execute_bash(cmd, repo_dir)
-                cmd_elapsed = time.perf_counter() - t_cmd
-                info["elapsed_s_tools"] += cmd_elapsed
-                step_record["command"] = cmd
-                step_record["command_runtime_s"] += cmd_elapsed
-                output_for_observation = _truncate_head_tail(
-                    output,
-                    max_len=PER_COMMAND_OBS_CAP,
-                    head=2000,
-                    tail=2000,
-                )
                 _rlog(
-                    f"Step {step+1}: command done in {cmd_elapsed:.2f}s "
-                    f"output_chars={len(output)} obs_chars={len(output_for_observation)}"
+                    f"Step {step+1}: command done in {time.perf_counter() - t_cmd:.2f}s "
+                    f"output_chars={len(output)}"
                 )
-                observations.append(f"$ {cmd}\n{output_for_observation}")
-
-                if patch_mode == "git_diff" and cmd.strip().startswith("git diff") and "diff --git" in output:
-                    messages.append({"role": "assistant", "content": response_text})
-                    obs_text = "\n\n".join(observations)
-                    messages.append({"role": "user", "content": f"## Command Output\n{obs_text}"})
-                    observation_appended = True
-                    _rlog(f"Step {step+1}: git diff command produced patch-like output")
-                    break
+                observations.append(f"$ {cmd}\n{output}")
 
             # Debug: write bash commands + outputs
-            _debug_write(
+            if _debug_write(
                 debug_dir,
                 f"bash_step_{step}.txt",
                 "\n\n".join(observations),
-            )
+            ):
+                info["bash_step_artifacts"] += 1
 
-            if observations and not observation_appended:
-                messages.append({"role": "assistant", "content": response_text})
-                obs_text = "\n\n".join(observations)
-                messages.append({
-                    "role": "user",
-                    "content": f"## Command Output\n{obs_text}",
-                })
-                _rlog(
-                    f"Step {step+1}: command observations appended chars={len(obs_text)} "
-                    f"step_elapsed={time.perf_counter() - step_start:.2f}s"
-                )
-            if not step_record_appended:
-                info["step_records"].append(step_record)
-        else:
-            info["steps_non_actionable"] += 1
-            info["non_actionable_count"] += 1
-            step_record["non_actionable"] = True
+            if stalled:
+                break
+
             messages.append({"role": "assistant", "content": response_text})
-            info["last_nudge"] = str(selection.get("nudge") or ACTIONABLE_NUDGE)
+            obs_text = "\n\n".join(observations)
             messages.append({
                 "role": "user",
-                "content": info["last_nudge"],
+                "content": f"## Command Output\n{obs_text}",
             })
-            info["step_records"].append(step_record)
             _rlog(
-                f"Step {step+1}: non-actionable response ({selection.get('reason')}); nudged model "
+                f"Step {step+1}: command observations appended chars={len(obs_text)} "
+                f"step_elapsed={time.perf_counter() - step_start:.2f}s"
+            )
+        else:
+            if not bash_blocks:
+                info["no_bash_block_count"] += 1
+                info["non_actionable_reason_counts"]["no_bash_block"] += 1
+            else:
+                info["empty_bash_block_count"] += 1
+                info["non_actionable_reason_counts"]["empty_bash_block"] += 1
+
+            # No bash and no diff — check for raw unfenced diff one more time
+            if not has_bash:
+                raw = extract_diff(cleaned)
+                if raw and ("diff --git" in raw or "--- a/" in raw):
+                    info["diff_block_found"] = True
+                    messages.append({"role": "assistant", "content": response_text})
+                    _debug_write(debug_dir, f"diff_extracted_step_{step}.txt", raw)
+                    _rlog(
+                        f"Step {step+1}: extracted raw diff fallback len={len(raw)} returning patch"
+                    )
+                    return raw, info
+
+            # Model produced text without actionable blocks — nudge it
+            messages.append({"role": "assistant", "content": response_text})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Please run a ```bash command to explore the code, "
+                    "or submit a ```diff block with your fix."
+                ),
+            })
+            _rlog(
+                f"Step {step+1}: no actionable block found; nudged model "
                 f"step_elapsed={time.perf_counter() - step_start:.2f}s"
             )
 
@@ -677,14 +466,12 @@ def _run_agent_loop(
         info["git_diff_non_empty"] = True
         _debug_write(debug_dir, "git_diff_fallback.txt", worktree_patch)
         _rlog(f"Agent loop fallback git diff found len={len(worktree_patch)}")
-        info.update(token_tracker.export())
         return worktree_patch, info
 
     _rlog(
         f"Agent loop ended without patch iid={instance.get('instance_id')} "
         f"status={info.get('status')} steps={info.get('steps_taken')}"
     )
-    info.update(token_tracker.export())
     return "", info
 
 
@@ -699,8 +486,6 @@ def generate_patch_with_sweagent(
     max_steps: int = DEFAULT_MAX_STEPS,
     traj_dir: Path | None = None,
     api_base: str | None = None,
-    strict_bash_mode: bool = STRICT_BASH_MODE_DEFAULT,
-    patch_mode: str = PATCH_MODE_DEFAULT,
 ) -> dict:
     """Run the mini-swe-agent on one instance and return result metadata.
 
@@ -734,9 +519,6 @@ def generate_patch_with_sweagent(
         "patch": "",
         "elapsed_s": 0.0,
         "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "token_usage_source": "estimated",
-        "reported_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "estimated_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "status": "ok",
         "error": None,
         "patch_source": "empty",
@@ -749,20 +531,17 @@ def generate_patch_with_sweagent(
         "stall_type": None,
         "stall_action": None,
         "stall_repeat_count": 0,
-        "stall_breaker_used": False,
-        "stall_breaker_command": None,
-        "steps_total": 0,
-        "steps_actionable": 0,
-        "steps_non_actionable": 0,
-        "elapsed_s_total": 0.0,
-        "elapsed_s_llm": 0.0,
-        "elapsed_s_tools": 0.0,
-        "elapsed_s_eval": 0.0,
-        "chars_prompt": 0,
-        "chars_completion": 0,
-        "extra_blocks_ignored": 0,
-        "last_nudge": None,
-        "step_records": [],
+        "repeated_command_stall_count": 0,
+        "debug_enabled": False,
+        "debug_dir": None,
+        "assistant_step_artifacts": 0,
+        "bash_step_artifacts": 0,
+        "no_bash_block_count": 0,
+        "empty_bash_block_count": 0,
+        "non_actionable_reason_counts": {
+            "no_bash_block": 0,
+            "empty_bash_block": 0,
+        },
     }
 
     # ── Debug directory (opt-in via SWEAGENT_BENCH_DEBUG=1) ──
@@ -799,8 +578,6 @@ def generate_patch_with_sweagent(
             timeout_s=timeout_s,
             api_base=api_base,
             debug_dir=debug_dir,
-            strict_bash_mode=strict_bash_mode,
-            patch_mode=patch_mode,
         )
         _rlog(
             f"Instance {iid}: agent loop complete in {time.perf_counter() - t_loop:.2f}s "
@@ -820,32 +597,16 @@ def generate_patch_with_sweagent(
     result["stall_detected"] = loop_info.get("stall_detected", False)
     result["stall_type"] = loop_info.get("stall_type")
     result["stall_repeat_count"] = loop_info.get("stall_repeat_count", 0)
-    result["stall_breaker_used"] = bool(loop_info.get("stall_breaker_used", False))
-    result["stall_breaker_command"] = loop_info.get("stall_breaker_command")
-    result["steps_total"] = int(loop_info.get("steps_total", 0) or 0)
-    result["steps_actionable"] = int(loop_info.get("steps_actionable", 0) or 0)
-    result["steps_non_actionable"] = int(loop_info.get("steps_non_actionable", 0) or 0)
-    result["elapsed_s_llm"] = float(loop_info.get("elapsed_s_llm", 0.0) or 0.0)
-    result["elapsed_s_tools"] = float(loop_info.get("elapsed_s_tools", 0.0) or 0.0)
-    result["elapsed_s_eval"] = float(loop_info.get("elapsed_s_eval", 0.0) or 0.0)
-    result["chars_prompt"] = int(loop_info.get("chars_prompt", 0) or 0)
-    result["chars_completion"] = int(loop_info.get("chars_completion", 0) or 0)
-    result["extra_blocks_ignored"] = int(loop_info.get("extra_blocks_ignored", 0) or 0)
-    result["last_nudge"] = loop_info.get("last_nudge")
-    result["step_records"] = loop_info.get("step_records", [])
-
-    result["token_usage_source"] = str(loop_info.get("token_usage_source", "estimated"))
-    result["reported_tokens"] = loop_info.get(
-        "reported_tokens",
-        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    )
-    result["estimated_tokens"] = loop_info.get(
-        "estimated_tokens",
-        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    )
-    result["token_usage"] = loop_info.get(
-        "token_usage",
-        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    result["repeated_command_stall_count"] = int(loop_info.get("repeated_command_stall_count", 0) or 0)
+    result["debug_enabled"] = bool(loop_info.get("debug_enabled", False))
+    result["debug_dir"] = loop_info.get("debug_dir")
+    result["assistant_step_artifacts"] = int(loop_info.get("assistant_step_artifacts", 0) or 0)
+    result["bash_step_artifacts"] = int(loop_info.get("bash_step_artifacts", 0) or 0)
+    result["no_bash_block_count"] = int(loop_info.get("no_bash_block_count", 0) or 0)
+    result["empty_bash_block_count"] = int(loop_info.get("empty_bash_block_count", 0) or 0)
+    result["non_actionable_reason_counts"] = loop_info.get(
+        "non_actionable_reason_counts",
+        {"no_bash_block": 0, "empty_bash_block": 0},
     )
 
     if patch:
@@ -879,7 +640,6 @@ def generate_patch_with_sweagent(
             _rlog(f"Instance {iid}: fallback context length error")
 
     result["elapsed_s"] = time.perf_counter() - start
-    result["elapsed_s_total"] = float(result["elapsed_s"])
     _rlog(
         f"Instance done iid={iid} elapsed={result['elapsed_s']:.2f}s "
         f"status={result['status']} patch_source={result['patch_source']} "
@@ -892,6 +652,14 @@ def generate_patch_with_sweagent(
         f"steps_taken: {loop_info.get('steps_taken', 0)}\n"
         f"diff_block_found: {loop_info.get('diff_block_found', False)}\n"
         f"git_diff_non_empty: {loop_info.get('git_diff_non_empty', False)}\n"
+        f"debug_enabled: {loop_info.get('debug_enabled', False)}\n"
+        f"debug_dir: {loop_info.get('debug_dir')}\n"
+        f"assistant_step_artifacts: {loop_info.get('assistant_step_artifacts', 0)}\n"
+        f"bash_step_artifacts: {loop_info.get('bash_step_artifacts', 0)}\n"
+        f"no_bash_block_count: {loop_info.get('no_bash_block_count', 0)}\n"
+        f"empty_bash_block_count: {loop_info.get('empty_bash_block_count', 0)}\n"
+        f"repeated_command_stall_count: {loop_info.get('repeated_command_stall_count', 0)}\n"
+        f"non_actionable_reason_counts: {json.dumps(loop_info.get('non_actionable_reason_counts', {}), sort_keys=True)}\n"
         f"patch_source: {result['patch_source']}\n"
         f"patch_len_before_sanitation: {len(result['patch'])}\n"
         f"fallback_single_shot_used: {result['fallback_single_shot_used']}\n"

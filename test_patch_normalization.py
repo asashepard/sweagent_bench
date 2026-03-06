@@ -1,4 +1,6 @@
 """Smoke tests for patch normalization/validation helpers."""
+import os
+
 from sweagent_bench.generation.patch_utils import (
     extract_unified_diff,
     normalize_and_validate_patch,
@@ -101,9 +103,17 @@ def test_hunk_header_count_mismatch_is_rejected() -> None:
         "+line5_new\n"
         "+line6_added\n"
     )
-    normalized, err = normalize_and_validate_patch(patch)
-    assert normalized == ""
-    assert err is not None and "expected 6/7 got 5/6" in err
+    prev = os.environ.get("SWEAGENT_STRICT_HUNK_COUNTS")
+    os.environ["SWEAGENT_STRICT_HUNK_COUNTS"] = "1"
+    try:
+        normalized, err = normalize_and_validate_patch(patch)
+        assert normalized == ""
+        assert err is not None and "expected 6/7 got 5/6" in err
+    finally:
+        if prev is None:
+            os.environ.pop("SWEAGENT_STRICT_HUNK_COUNTS", None)
+        else:
+            os.environ["SWEAGENT_STRICT_HUNK_COUNTS"] = prev
 
 
 if __name__ == "__main__":
