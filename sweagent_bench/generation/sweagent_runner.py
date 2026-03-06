@@ -33,7 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sweagent_bench.generation.patch_utils import extract_diff, sanitize_patch_for_preds
-from sweagent_bench.llm.openai_compat import ContextLengthError, chat_completion
+from sweagent_bench.llm.openai_compat import ContextLengthError, chat_completion_with_metadata
+from sweagent_bench.utils.tokens import TokenUsageTracker
 
 
 def _env_int(name: str, default: int) -> int:
@@ -342,7 +343,12 @@ def _run_agent_loop(
             "no_bash_block": 0,
             "empty_bash_block": 0,
         },
+        "token_usage_source": "estimated",
+        "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "reported_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "estimated_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+    token_tracker = TokenUsageTracker()
 
     deadline = time.perf_counter() + timeout_s
     recent_cmds: list[str] = []
@@ -372,13 +378,20 @@ def _run_agent_loop(
             remaining = max(30, int(deadline - time.perf_counter()))
             t_llm = time.perf_counter()
             messages = _trim_messages(messages, max_turns=AGENT_MAX_TURNS)
-            response_text = chat_completion(
+            prompt_text = "\n\n".join(
+                f"{m.get('role', '')}: {m.get('content', '')}"
+                for m in messages
+            )
+            llm_data = chat_completion_with_metadata(
                 model=model,
                 messages=messages,
                 temperature=0.0,
                 max_tokens=AGENT_MAX_TOKENS,
                 timeout_s=min(remaining, 300),
             )
+            response_text = llm_data.get("content", "") if isinstance(llm_data, dict) else ""
+            usage = llm_data.get("usage", {}) if isinstance(llm_data, dict) else {}
+            token_tracker.add_step(prompt_text, response_text, usage)
             _rlog(
                 f"Step {step+1}: LLM response received in {time.perf_counter() - t_llm:.2f}s "
                 f"chars={len(response_text)}"
@@ -424,6 +437,7 @@ def _run_agent_loop(
                 f"Step {step+1}: extracted diff candidate len={len(diff_candidate)} "
                 f"returning patch"
             )
+            info.update(token_tracker.export())
             return diff_candidate, info
 
         # ── Execute bash blocks ──
@@ -513,6 +527,7 @@ def _run_agent_loop(
                     _rlog(
                         f"Step {step+1}: extracted raw diff fallback len={len(raw)} returning patch"
                     )
+                    info.update(token_tracker.export())
                     return raw, info
 
             consecutive_non_actionable += 1
@@ -548,8 +563,10 @@ def _run_agent_loop(
         info["git_diff_non_empty"] = True
         _debug_write(debug_dir, "git_diff_fallback.txt", worktree_patch)
         _rlog(f"Agent loop fallback git diff found len={len(worktree_patch)}")
+        info.update(token_tracker.export())
         return worktree_patch, info
 
+    info.update(token_tracker.export())
     _rlog(
         f"Agent loop ended without patch iid={instance.get('instance_id')} "
         f"status={info.get('status')} steps={info.get('steps_taken')}"
@@ -601,6 +618,9 @@ def generate_patch_with_sweagent(
         "patch": "",
         "elapsed_s": 0.0,
         "token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "token_usage_source": "estimated",
+        "reported_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "estimated_tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "status": "ok",
         "error": None,
         "patch_source": "empty",
@@ -624,6 +644,11 @@ def generate_patch_with_sweagent(
             "no_bash_block": 0,
             "empty_bash_block": 0,
         },
+        "steps_taken": 0,
+        "diff_block_found": False,
+        "git_diff_non_empty": False,
+        "raw_patch_len": 0,
+        "sanitized_patch_len": 0,
     }
 
     # ── Debug directory (opt-in via SWEAGENT_BENCH_DEBUG=1) ──
@@ -690,10 +715,29 @@ def generate_patch_with_sweagent(
         "non_actionable_reason_counts",
         {"no_bash_block": 0, "empty_bash_block": 0},
     )
+    result["steps_taken"] = int(loop_info.get("steps_taken", 0) or 0)
+    result["diff_block_found"] = bool(loop_info.get("diff_block_found", False))
+    result["git_diff_non_empty"] = bool(loop_info.get("git_diff_non_empty", False))
+    result["token_usage_source"] = str(loop_info.get("token_usage_source", "estimated") or "estimated")
+    result["reported_tokens"] = loop_info.get(
+        "reported_tokens",
+        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    )
+    result["estimated_tokens"] = loop_info.get(
+        "estimated_tokens",
+        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    )
+    loop_usage = loop_info.get("token_usage", {}) if isinstance(loop_info, dict) else {}
+    result["token_usage"] = {
+        "prompt_tokens": int(loop_usage.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(loop_usage.get("completion_tokens", 0) or 0),
+        "total_tokens": int(loop_usage.get("total_tokens", 0) or 0),
+    }
 
     if patch:
         result["patch"] = patch
         result["patch_source"] = "agent_loop"
+        result["raw_patch_len"] = len(patch)
         _rlog(f"Instance {iid}: patch from agent loop len={len(patch)}")
 
     # ── Fallback to single-shot if agent produced no patch ──
@@ -701,13 +745,40 @@ def generate_patch_with_sweagent(
         try:
             _rlog(f"Instance {iid}: entering single-shot fallback")
             t_fallback = time.perf_counter()
-            patch = _fallback_single_shot(instance, model, guidance_text, api_base, repo_dir)
+            patch, fallback_token_meta = _fallback_single_shot(
+                instance,
+                model,
+                guidance_text,
+                api_base,
+                repo_dir,
+            )
+            fallback_usage = fallback_token_meta.get("token_usage", {}) if isinstance(fallback_token_meta, dict) else {}
+            result["token_usage"]["prompt_tokens"] += int(fallback_usage.get("prompt_tokens", 0) or 0)
+            result["token_usage"]["completion_tokens"] += int(fallback_usage.get("completion_tokens", 0) or 0)
+            result["token_usage"]["total_tokens"] += int(fallback_usage.get("total_tokens", 0) or 0)
+            fallback_reported = fallback_token_meta.get("reported_tokens", {}) if isinstance(fallback_token_meta, dict) else {}
+            fallback_estimated = fallback_token_meta.get("estimated_tokens", {}) if isinstance(fallback_token_meta, dict) else {}
+            result_reported = result.get("reported_tokens", {})
+            result_estimated = result.get("estimated_tokens", {})
+            result["reported_tokens"] = {
+                "prompt_tokens": int(result_reported.get("prompt_tokens", 0) or 0) + int(fallback_reported.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(result_reported.get("completion_tokens", 0) or 0) + int(fallback_reported.get("completion_tokens", 0) or 0),
+                "total_tokens": int(result_reported.get("total_tokens", 0) or 0) + int(fallback_reported.get("total_tokens", 0) or 0),
+            }
+            result["estimated_tokens"] = {
+                "prompt_tokens": int(result_estimated.get("prompt_tokens", 0) or 0) + int(fallback_estimated.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(result_estimated.get("completion_tokens", 0) or 0) + int(fallback_estimated.get("completion_tokens", 0) or 0),
+                "total_tokens": int(result_estimated.get("total_tokens", 0) or 0) + int(fallback_estimated.get("total_tokens", 0) or 0),
+            }
+            if str(fallback_token_meta.get("token_usage_source", "estimated") or "estimated") == "reported":
+                result["token_usage_source"] = "reported"
             if patch:
                 result["patch"] = patch
                 result["fallback_single_shot_used"] = True
                 result["fallback_single_shot_patch_len"] = len(patch)
                 result["fallback_reason"] = "agent_empty_patch"
                 result["patch_source"] = "fallback_single_shot"
+                result["raw_patch_len"] = len(patch)
                 _rlog(
                     f"Instance {iid}: fallback produced patch len={len(patch)} "
                     f"in {time.perf_counter() - t_fallback:.2f}s"
@@ -722,6 +793,7 @@ def generate_patch_with_sweagent(
             _rlog(f"Instance {iid}: fallback context length error")
 
     result["elapsed_s"] = time.perf_counter() - start
+    result["sanitized_patch_len"] = len(result.get("patch", "") or "")
     _rlog(
         f"Instance done iid={iid} elapsed={result['elapsed_s']:.2f}s "
         f"status={result['status']} patch_source={result['patch_source']} "
@@ -759,9 +831,8 @@ def _fallback_single_shot(
     guidance_text: str | None,
     api_base: str | None,
     repo_dir: Path,
-) -> str:
+) -> tuple[str, dict]:
     """Fallback: generate patch via direct LLM call (no agent loop)."""
-    from sweagent_bench.llm.openai_compat import chat_completion
     from sweagent_bench.prompting.prompt_builder import build_messages
 
     messages = build_messages(
@@ -775,17 +846,25 @@ def _fallback_single_shot(
     # Temporarily override API base if provided, then restore.
     # This avoids permanently mutating the process environment.
     prev_base = os.environ.get("OPENAI_BASE_URL")
+    token_tracker = TokenUsageTracker()
     try:
         if api_base:
             os.environ["OPENAI_BASE_URL"] = api_base
 
-        raw = chat_completion(
+        prompt_text = "\n\n".join(
+            f"{m.get('role', '')}: {m.get('content', '')}"
+            for m in messages
+        )
+        llm_data = chat_completion_with_metadata(
             model=model,
             messages=messages,
             temperature=0.0,
             max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
             timeout_s=120,
         )
+        raw = llm_data.get("content", "") if isinstance(llm_data, dict) else ""
+        usage = llm_data.get("usage", {}) if isinstance(llm_data, dict) else {}
+        token_tracker.add_step(prompt_text, raw, usage)
     finally:
         if api_base:
             if prev_base is not None:
@@ -794,4 +873,4 @@ def _fallback_single_shot(
                 os.environ.pop("OPENAI_BASE_URL", None)
 
     from sweagent_bench.generation.patch_utils import extract_diff
-    return extract_diff(raw)
+    return extract_diff(raw), token_tracker.export()

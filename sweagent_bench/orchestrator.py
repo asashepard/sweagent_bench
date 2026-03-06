@@ -466,11 +466,17 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                     "instance_id": iid,
                     "repo": repo,
                     "condition": condition,
+                    "wall_s": float(wall_s),
                     "elapsed_s": float(run_meta.get("elapsed_s", 0.0) or 0.0),
                     "patch_non_empty": bool(patch and patch.strip()),
+                    "patch_len_chars": int(len(patch or "")),
                     "status": run_meta.get("status", "ok"),
                     "error": run_meta.get("error"),
                     "patch_source": run_meta.get("patch_source", "empty"),
+                    "steps_taken": int(run_meta.get("steps_taken", 0) or 0),
+                    "used_max_steps": bool(int(run_meta.get("steps_taken", 0) or 0) >= int(config.step_limit)),
+                    "diff_block_found": bool(run_meta.get("diff_block_found", False)),
+                    "git_diff_non_empty": bool(run_meta.get("git_diff_non_empty", False)),
                     "fallback_single_shot_used": bool(run_meta.get("fallback_single_shot_used", False)),
                     "fallback_single_shot_patch_len": int(run_meta.get("fallback_single_shot_patch_len", 0) or 0),
                     "fallback_single_shot_raw_len": int(run_meta.get("fallback_single_shot_raw_len", 0) or 0),
@@ -490,6 +496,15 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                     "non_actionable_reason_counts": run_meta.get(
                         "non_actionable_reason_counts",
                         {"no_bash_block": 0, "empty_bash_block": 0},
+                    ),
+                    "token_usage_source": str(run_meta.get("token_usage_source", "estimated") or "estimated"),
+                    "reported_tokens": run_meta.get(
+                        "reported_tokens",
+                        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    ),
+                    "estimated_tokens": run_meta.get(
+                        "estimated_tokens",
+                        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                     ),
                     "token_usage": {
                         "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
@@ -678,6 +693,26 @@ def _collect_condition_generation_stats(
         "completion_tokens": 0,
         "total_tokens": 0,
     }
+    token_usage_by_source = {
+        "reported": 0,
+        "estimated": 0,
+    }
+    patch_len_total = 0
+    patch_len_non_empty_total = 0
+    patch_len_max = 0
+    steps_total = 0
+    steps_for_patch_total = 0
+    steps_for_patch_count = 0
+    used_max_steps_count = 0
+    diff_block_found_count = 0
+    git_diff_non_empty_count = 0
+    no_bash_block_total = 0
+    empty_bash_block_total = 0
+    wall_s_total = 0.0
+    wall_to_elapsed_ratio_sum = 0.0
+    wall_to_elapsed_ratio_count = 0
+    token_per_elapsed_instance_count = 0
+    tokens_per_second_sum = 0.0
 
     for iid in target_ids:
         metric = metrics_by_id.get(iid)
@@ -686,11 +721,47 @@ def _collect_condition_generation_stats(
 
         if metric is not None:
             patch_non_empty_i = bool(metric.get("patch_non_empty"))
-            elapsed_s += float(metric.get("elapsed_s", 0.0) or 0.0)
+            metric_elapsed_s = float(metric.get("elapsed_s", 0.0) or 0.0)
+            elapsed_s += metric_elapsed_s
             usage = metric.get("token_usage", {}) if isinstance(metric, dict) else {}
+            token_total_i = int(usage.get("total_tokens", 0) or 0)
             token_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
             token_usage["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
-            token_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+            token_usage["total_tokens"] += token_total_i
+
+            token_source = str(metric.get("token_usage_source", "") or "")
+            if token_source in token_usage_by_source:
+                token_usage_by_source[token_source] += 1
+
+            patch_len_i = int(metric.get("patch_len_chars", 0) or 0)
+            patch_len_total += patch_len_i
+            patch_len_max = max(patch_len_max, patch_len_i)
+
+            steps_i = int(metric.get("steps_taken", 0) or 0)
+            steps_total += steps_i
+            if patch_non_empty_i:
+                steps_for_patch_total += steps_i
+                steps_for_patch_count += 1
+
+            if bool(metric.get("used_max_steps", False)):
+                used_max_steps_count += 1
+            if bool(metric.get("diff_block_found", False)):
+                diff_block_found_count += 1
+            if bool(metric.get("git_diff_non_empty", False)):
+                git_diff_non_empty_count += 1
+
+            no_bash_block_total += int(metric.get("no_bash_block_count", 0) or 0)
+            empty_bash_block_total += int(metric.get("empty_bash_block_count", 0) or 0)
+
+            wall_s_i = float(metric.get("wall_s", 0.0) or 0.0)
+            wall_s_total += wall_s_i
+            if wall_s_i > 0.0 and metric_elapsed_s > 0.0:
+                wall_to_elapsed_ratio_sum += wall_s_i / metric_elapsed_s
+                wall_to_elapsed_ratio_count += 1
+
+            if metric_elapsed_s > 0.0:
+                tokens_per_second_sum += token_total_i / metric_elapsed_s
+                token_per_elapsed_instance_count += 1
 
             status = str(metric.get("status", "") or "")
             if status == "missing_image":
@@ -717,23 +788,58 @@ def _collect_condition_generation_stats(
             if not patch_non_empty_i:
                 empty_patch_count += 1
             patch_source_counts["model" if patch_non_empty_i else "empty"] += 1
+            patch_len_i = len(str(patch_text or ""))
+            patch_len_total += patch_len_i
+            patch_len_max = max(patch_len_max, patch_len_i)
 
         if patch_non_empty_i:
             patch_non_empty += 1
+            if metric is not None:
+                patch_len_non_empty_total += int(metric.get("patch_len_chars", 0) or 0)
+            else:
+                patch_len_non_empty_total += len(str(patch_text or ""))
 
     return {
         "attempted": attempted,
         "instances_processed": attempted,
         "patch_non_empty": patch_non_empty,
         "patch_non_empty_rate": (patch_non_empty / attempted) if attempted else 0.0,
+        "avg_patch_len_chars_all": (patch_len_total / attempted) if attempted else 0.0,
+        "avg_patch_len_chars_non_empty": (
+            patch_len_non_empty_total / patch_non_empty
+        ) if patch_non_empty else 0.0,
+        "max_patch_len_chars": patch_len_max,
         "empty_patch_count": empty_patch_count,
         "missing_image_count": missing_image_count,
         "error_count": error_count,
         "fallback_single_shot_used_count": fallback_single_shot_used_count,
         "fallback_single_shot_success_count": fallback_single_shot_success_count,
         "stalled_repeat_failure_count": stalled_repeat_failure_count,
+        "steps_total": steps_total,
+        "avg_steps_per_instance": (steps_total / attempted) if attempted else 0.0,
+        "avg_steps_to_non_empty_patch": (
+            steps_for_patch_total / steps_for_patch_count
+        ) if steps_for_patch_count else 0.0,
+        "used_max_steps_count": used_max_steps_count,
+        "used_max_steps_rate": (used_max_steps_count / attempted) if attempted else 0.0,
+        "diff_block_found_count": diff_block_found_count,
+        "git_diff_non_empty_count": git_diff_non_empty_count,
+        "no_bash_block_total": no_bash_block_total,
+        "empty_bash_block_total": empty_bash_block_total,
         "patch_source_counts": patch_source_counts,
         "elapsed_s": elapsed_s,
         "mean_elapsed_s": (elapsed_s / attempted) if attempted else 0.0,
+        "wall_s_total": wall_s_total,
+        "mean_wall_s": (wall_s_total / attempted) if attempted else 0.0,
+        "mean_wall_to_elapsed_ratio": (
+            wall_to_elapsed_ratio_sum / wall_to_elapsed_ratio_count
+        ) if wall_to_elapsed_ratio_count else 0.0,
         "token_usage": token_usage,
+        "token_usage_by_source": token_usage_by_source,
+        "tokens_per_second": (
+            tokens_per_second_sum / token_per_elapsed_instance_count
+        ) if token_per_elapsed_instance_count else 0.0,
+        "tokens_per_non_empty_patch": (
+            token_usage["total_tokens"] / patch_non_empty
+        ) if patch_non_empty else 0.0,
     }
