@@ -52,14 +52,13 @@ CONDITIONS="no_context static_kb oracle_tuned" \
 IDS_FILE=ids/verified_smoke_4_ids.txt \
 ORACLE_ITERS=3 \
 ORACLE_PROBE_TIMEOUT=180 \
-ORACLE_PROBE_MAX_STEPS=6 \
 TIMEOUT=1800 \
 STEP_LIMIT=50 \
 sbatch slurm/run_experiment.sh
 ```
 
 `slurm/run_experiment.sh` forwards those values to `scripts/run_experiment.sh`,
-which now passes `--oracle-probe-timeout` and `--oracle-probe-max-steps` to the CLI.
+which passes `--oracle-probe-timeout` to the CLI.
 
 ## Output
 
@@ -74,11 +73,12 @@ results/<exp_id>/
 ```
 
 `metrics/<condition>_instances.jsonl` records per-instance runner accounting, including:
-- `steps_total`, `steps_actionable`, `steps_non_actionable`
-- `elapsed_s_total`, `elapsed_s_llm`, `elapsed_s_tools`, `elapsed_s_eval`
-- `chars_prompt`, `chars_completion`
+- `steps_taken`, `elapsed_s`, `wall_s`, `patch_len_chars`
+- `patch_source`, `fallback_single_shot_used`, `fallback_reason`
+- `stall_type`, `stall_repeat_count`, `no_bash_block_count`, `empty_bash_block_count`
 - `token_usage_source` (`reported` or `estimated`)
 - `token_usage`, `reported_tokens`, `estimated_tokens`
 
-`experiment_summary.json` includes condition-level aggregates for the same step/time/token fields
-under each condition's `generation_metrics`.
+`experiment_summary.json` includes condition-level aggregates under each condition's
+`generation_metrics`, including patch yield/rates, patch-size averages, step efficiency,
+fallback usage, token totals/rates, and patch-source distribution.

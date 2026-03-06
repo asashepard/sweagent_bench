@@ -25,7 +25,6 @@ MAX_EDITS_PER_ITERATION = 8
 RESERVED_CHAR_BUFFER = 640
 SOFT_CHAR_BUDGET = AGENTS_MD_CHAR_BUDGET - RESERVED_CHAR_BUFFER
 MIN_EDIT_SUPPORT_DEFAULT = 2
-FORCED_ORACLE_PROBE_TIMEOUT_S = 600
 ORACLE_PROBE_EXECUTION_MODE = "single_shot"
 
 
@@ -40,6 +39,11 @@ def _summarize_edit(edit: Edit, max_len: int = 180) -> str:
     if len(content) > max_len:
         content = content[: max_len - 3] + "..."
     return f"section={edit.section!r} action={edit.action!r} content={content!r}"
+
+
+def _runner_note_value(overall_notes: str, key: str) -> str:
+    match = re.search(rf"{re.escape(key)}=([^;|]+)", overall_notes or "")
+    return match.group(1).strip() if match else ""
 
 
 def _normalize_probe_text(text: str) -> str:
@@ -203,9 +207,10 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
     for t in range(start_iter, config.iterations + 1):
         iter_start = time.perf_counter()
         _olog(f"Iteration {t}/{config.iterations} started for {config.repo}")
+        effective_probe_timeout_s = max(30, int(config.probe_timeout_s))
         _olog(
             f"Iteration {t}: probe execution mode={ORACLE_PROBE_EXECUTION_MODE} "
-            f"timeout_s={FORCED_ORACLE_PROBE_TIMEOUT_S} (forced)"
+            f"timeout_s={effective_probe_timeout_s}"
         )
         guidance_before = agents_md
         iter_stop_reason = ""
@@ -320,7 +325,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             "guidance_changed": guidance_changed,
             "no_change_counted": no_change_counted,
             "probe_execution_mode": ORACLE_PROBE_EXECUTION_MODE,
-            "effective_probe_timeout_s": FORCED_ORACLE_PROBE_TIMEOUT_S,
+            "effective_probe_timeout_s": effective_probe_timeout_s,
         }
         if iter_stop_reason:
             summary["stop_reason"] = iter_stop_reason
@@ -391,7 +396,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
 def _evaluate_all_probes_detailed(
     agents_md: str, probes: list[Probe], config: OracleConfig,
 ) -> list[ProbeResult]:
-    effective_probe_timeout_s = FORCED_ORACLE_PROBE_TIMEOUT_S
+    effective_probe_timeout_s = max(30, int(config.probe_timeout_s))
     results: list[ProbeResult] = []
     for i, probe in enumerate(probes):
         try:
@@ -409,20 +414,22 @@ def _evaluate_all_probes_detailed(
             )
             results.append(result)
             runner_status = ""
-            runner_patch_source = ""
-            runner_patch_len = 0
+            runner_error = ""
+            token_total = 0
             if result.overall_notes:
-                status_match = re.search(r"runner_status=([^;|]+)", result.overall_notes)
-                source_match = re.search(r"runner_patch_source=([^;|]+)", result.overall_notes)
-                len_match = re.search(r"runner_patch_len=(\d+)", result.overall_notes)
-                runner_status = status_match.group(1).strip() if status_match else ""
-                runner_patch_source = source_match.group(1).strip() if source_match else ""
-                runner_patch_len = int(len_match.group(1)) if len_match else 0
+                runner_status = _runner_note_value(result.overall_notes, "runner_status")
+                runner_error = _runner_note_value(result.overall_notes, "runner_error")
+                token_total_raw = _runner_note_value(result.overall_notes, "runner_token_total")
+                token_total = int(token_total_raw) if token_total_raw.isdigit() else 0
+            status_suffix = f" status={runner_status or 'unknown'}"
+            if runner_status.lower() == "error":
+                status_suffix += f" error={runner_error or 'unknown'}"
+            else:
+                status_suffix += f" tokens={token_total}"
             _olog(
                 f"Probe {i+1}/{len(probes)} complete in {time.perf_counter() - t_probe:.2f}s "
-                f"reviews={len(result.behavior_reviews)} edits={len(result.proposed_edits)} "
-                f"runner_status={runner_status} runner_patch_source={runner_patch_source} "
-                f"runner_patch_len={runner_patch_len}"
+                f"reviews={len(result.behavior_reviews)} edits={len(result.proposed_edits)}"
+                f"{status_suffix}"
             )
         except Exception as exc:
             _olog(f"Probe {i+1}/{len(probes)} ERROR: {exc}")
@@ -437,6 +444,9 @@ def _evaluate_all_probes_detailed(
 def _collect_edits_from_results(results: list[ProbeResult]) -> list[Edit]:
     edits: list[Edit] = []
     for result in results:
+        run_status = _runner_note_value(result.overall_notes, "runner_status").lower()
+        if run_status == "error":
+            continue
         edits.extend(result.proposed_edits)
     return edits
 
@@ -514,6 +524,29 @@ def _prioritize_edits_for_iteration(
         seen_keys.add(key)
         if len(selected) >= max_edits:
             break
+
+    if not selected:
+        fallback_ranked = sorted(
+            deduped_edits,
+            key=lambda e: (
+                action_weight.get(e.action.strip().lower(), 0),
+                -len(e.content),
+            ),
+            reverse=True,
+        )
+        for edit in fallback_ranked:
+            key = _edit_key(edit)
+            action = edit.action.strip().lower()
+            if key in seen_keys:
+                continue
+            if _looks_overly_instance_specific(edit):
+                continue
+            if at_or_over_soft_budget and action == "add":
+                continue
+            selected.append(edit)
+            seen_keys.add(key)
+            if len(selected) >= min(max_edits, 2):
+                break
 
     return selected
 

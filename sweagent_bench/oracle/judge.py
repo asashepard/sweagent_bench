@@ -255,10 +255,14 @@ def evaluate_probe(
         model=model, timeout_s=timeout_s,
     )
     run_status = str(run_meta.get("status", "") or "")
+    run_error = str(run_meta.get("error", "") or "")
     run_patch_source = str(run_meta.get("patch_source", "") or "")
     run_patch_len = len(str(run_meta.get("patch", "") or ""))
+    run_token_total = int((run_meta.get("token_usage") or {}).get("total_tokens", 0) or 0)
     run_note = (
         f"runner_status={run_status}; "
+        f"runner_error={run_error}; "
+        f"runner_token_total={run_token_total}; "
         f"runner_patch_source={run_patch_source}; "
         f"runner_patch_len={run_patch_len}"
     )

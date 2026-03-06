@@ -831,6 +831,7 @@ def _fallback_single_shot(
     guidance_text: str | None,
     api_base: str | None,
     repo_dir: Path,
+    timeout_s: int = 120,
 ) -> tuple[str, dict]:
     """Fallback: generate patch via direct LLM call (no agent loop)."""
     from sweagent_bench.prompting.prompt_builder import build_messages
@@ -860,7 +861,7 @@ def _fallback_single_shot(
             messages=messages,
             temperature=0.0,
             max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-            timeout_s=120,
+            timeout_s=timeout_s,
         )
         raw = llm_data.get("content", "") if isinstance(llm_data, dict) else ""
         usage = llm_data.get("usage", {}) if isinstance(llm_data, dict) else {}

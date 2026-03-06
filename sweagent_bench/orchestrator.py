@@ -680,8 +680,7 @@ def _collect_condition_generation_stats(
     fallback_single_shot_success_count = 0
     stalled_repeat_failure_count = 0
     patch_source_counts: dict[str, int] = {
-        "container": 0,
-        "model": 0,
+        "agent_loop": 0,
         "fallback_single_shot": 0,
         "empty": 0,
     }
@@ -785,17 +784,23 @@ def _collect_condition_generation_stats(
             patch_non_empty_i = bool(patch_text and str(patch_text).strip())
             if not patch_non_empty_i:
                 empty_patch_count += 1
-            patch_source_counts["model" if patch_non_empty_i else "empty"] += 1
+            patch_source_counts["agent_loop" if patch_non_empty_i else "empty"] += 1
             patch_len_i = len(str(patch_text or ""))
             patch_len_total += patch_len_i
             patch_len_max = max(patch_len_max, patch_len_i)
-
         if patch_non_empty_i:
             patch_non_empty += 1
             if metric is not None:
                 patch_len_non_empty_total += int(metric.get("patch_len_chars", 0) or 0)
             else:
                 patch_len_non_empty_total += len(str(patch_text or ""))
+
+    patch_source_counts_legacy = {
+        "container": int(patch_source_counts.get("agent_loop", 0)),
+        "model": int(patch_source_counts.get("agent_loop", 0)),
+        "fallback_single_shot": int(patch_source_counts.get("fallback_single_shot", 0)),
+        "empty": int(patch_source_counts.get("empty", 0)),
+    }
 
     return {
         "attempted": attempted,
@@ -825,6 +830,7 @@ def _collect_condition_generation_stats(
         "no_bash_block_total": no_bash_block_total,
         "empty_bash_block_total": empty_bash_block_total,
         "patch_source_counts": patch_source_counts,
+        "patch_source_counts_legacy": patch_source_counts_legacy,
         "elapsed_s": elapsed_s,
         "mean_elapsed_s": (elapsed_s / attempted) if attempted else 0.0,
         "wall_s_total": wall_s_total,
