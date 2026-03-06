@@ -292,11 +292,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
                 prior_probe_tasks.append(probe.task)
                 deduped_probes.append(probe)
 
-        if len(deduped_probes) < TARGET_PROBES_PER_ITERATION:
-            raise RuntimeError(
-                f"Failed to enforce {TARGET_PROBES_PER_ITERATION} probes "
-                f"(kept={len(deduped_probes)}, dropped={duplicate_probe_count})"
-            )
+        target_probes_met = len(deduped_probes) >= TARGET_PROBES_PER_ITERATION
         _olog(
             f"Iteration {t}: generated {len(generated_probes)} probes in "
             f"{time.perf_counter() - t_probe_gen:.2f}s (pool={len(generated_probes)})"
@@ -306,6 +302,11 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             f"kept={len(deduped_probes)} target={TARGET_PROBES_PER_ITERATION} "
             f"topup_attempts={topup_attempts}"
         )
+        if not target_probes_met:
+            _olog(
+                f"Iteration {t}: warning target probes not met; continuing with "
+                f"kept={len(deduped_probes)}"
+            )
         if deduped_probes:
             probe_ids = ", ".join(p.id for p in deduped_probes)
             _olog(f"Iteration {t}: probe ids this round: {probe_ids}")
@@ -386,6 +387,8 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         summary: dict = {
             "probe_count_generated": len(generated_probes),
             "probe_count_after_dedup": len(deduped_probes),
+            "probe_count_target": TARGET_PROBES_PER_ITERATION,
+            "probe_count_target_met": target_probes_met,
             "probe_count_evaluated": probe_count_evaluated,
             "selected_edit_count": len(edits),
             "guidance_changed": guidance_changed,
