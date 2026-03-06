@@ -43,12 +43,35 @@ EDITS TO APPLY:
 
 Output the updated AGENTS.MD."""
 
+_META_INVALID_MARKERS = [
+    "Thinking Process",
+    "Analyze the Request",
+    "Role:",
+    "Task:",
+    "Constraints:",
+    "Solution:",
+    "[... truncated]",
+]
+
+
+def _strip_think_blocks(text: str) -> str:
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+
+def _find_invalid_reason(agents_md: str) -> str | None:
+    for marker in _META_INVALID_MARKERS:
+        if marker.lower() in agents_md.lower():
+            return f"contains meta/editor marker: {marker}"
+    if len(agents_md) > AGENTS_MD_CHAR_BUDGET:
+        return f"exceeds character budget: {len(agents_md)} > {AGENTS_MD_CHAR_BUDGET}"
+    return None
+
 
 def apply_edits(
     agents_md: str, edits: list[Edit], model: str, *, timeout_s: int = 120,
-) -> str:
+) -> tuple[str, dict]:
     if not edits:
-        return agents_md
+        return agents_md, {"accepted": True, "reason": None, "raw_output": "", "sanitized_output": agents_md}
 
     edits_text = "\n".join(
         f"- [{e.action.upper()}] Section: {e.section} — {e.content}"
@@ -64,12 +87,24 @@ def apply_edits(
     result = raw.strip()
     result = re.sub(r"^```(?:markdown)?\s*", "", result)
     result = re.sub(r"\s*```$", "", result)
+    result = _strip_think_blocks(result).strip()
     result = _remove_exact_duplicate_bullets(result)
 
-    if len(result) > AGENTS_MD_CHAR_BUDGET:
-        result = result[:AGENTS_MD_CHAR_BUDGET - 20] + "\n\n[... truncated]"
+    invalid_reason = _find_invalid_reason(result)
+    if invalid_reason:
+        return agents_md, {
+            "accepted": False,
+            "reason": invalid_reason,
+            "raw_output": raw,
+            "sanitized_output": result,
+        }
 
-    return result
+    return result, {
+        "accepted": True,
+        "reason": None,
+        "raw_output": raw,
+        "sanitized_output": result,
+    }
 
 
 def _remove_exact_duplicate_bullets(agents_md: str) -> str:

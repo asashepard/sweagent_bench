@@ -359,7 +359,30 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         if edits:
             t_apply = time.perf_counter()
             before_agents_md = agents_md
-            agents_md = apply_edits(agents_md, edits, config.model, timeout_s=config.timeout_s)
+            agents_md_candidate, apply_meta = apply_edits(
+                agents_md,
+                edits,
+                config.model,
+                timeout_s=config.timeout_s,
+            )
+            apply_accepted = bool(apply_meta.get("accepted", True))
+            if apply_accepted:
+                agents_md = agents_md_candidate
+            else:
+                reject_reason = str(apply_meta.get("reason", "invalid_output") or "invalid_output")
+                agents_md = before_agents_md
+                _olog(f"Iteration {t}: apply_edits rejected output; keeping previous guidance ({reject_reason})")
+                rejected_raw = str(apply_meta.get("raw_output", "") or "")
+                rejected_sanitized = str(apply_meta.get("sanitized_output", "") or "")
+                rejected_path = out / f"iteration_{t}_apply_rejected.txt"
+                rejected_path.write_text(
+                    (
+                        f"reason: {reject_reason}\n\n"
+                        f"--- RAW OUTPUT ---\n{rejected_raw}\n\n"
+                        f"--- SANITIZED OUTPUT ---\n{rejected_sanitized}\n"
+                    ),
+                    encoding="utf-8",
+                )
             _olog(
                 f"Iteration {t}: apply_edits complete in "
                 f"{time.perf_counter() - t_apply:.2f}s"
