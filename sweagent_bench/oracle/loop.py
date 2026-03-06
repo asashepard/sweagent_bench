@@ -23,6 +23,7 @@ from sweagent_bench.probes import run_all_probes
 MAX_EDITS_PER_ITERATION = 8
 RESERVED_CHAR_BUFFER = 640
 SOFT_CHAR_BUDGET = AGENTS_MD_CHAR_BUDGET - RESERVED_CHAR_BUFFER
+MIN_EDIT_SUPPORT_DEFAULT = 2
 
 
 def _olog(msg: str) -> None:
@@ -268,9 +269,13 @@ def _prioritize_edits_for_iteration(
         key = _edit_key(edit)
         freq_by_key[key] = freq_by_key.get(key, 0) + 1
 
+    min_support = MIN_EDIT_SUPPORT_DEFAULT
+    if len(deduped_edits) <= 3:
+        min_support = 1
+
     at_or_over_soft_budget = len(current_agents_md) >= SOFT_CHAR_BUDGET
     selected: list[Edit] = []
-    seen_intents: set[str] = set()
+    seen_keys: set[tuple[str, str, str]] = set()
 
     ranked = sorted(
         deduped_edits,
@@ -283,21 +288,24 @@ def _prioritize_edits_for_iteration(
     )
 
     for edit in ranked:
+        key = _edit_key(edit)
+        support = freq_by_key.get(key, 1)
         action = edit.action.strip().lower()
-        intent = _intent_key(edit.content)
 
-        if intent and intent in seen_intents:
+        if key in seen_keys:
             continue
 
         if _looks_overly_instance_specific(edit):
+            continue
+
+        if support < min_support:
             continue
 
         if at_or_over_soft_budget and action == "add":
             continue
 
         selected.append(edit)
-        if intent:
-            seen_intents.add(intent)
+        seen_keys.add(key)
         if len(selected) >= max_edits:
             break
 
@@ -310,15 +318,6 @@ def _edit_key(edit: Edit) -> tuple[str, str, str]:
         edit.action.strip().lower(),
         " ".join(edit.content.strip().split()).lower(),
     )
-
-
-def _intent_key(text: str) -> str:
-    norm = text.lower()
-    norm = re.sub(r"`[^`]+`", "", norm)
-    norm = re.sub(r"[a-zA-Z0-9_./-]+\.py", "", norm)
-    norm = re.sub(r"\b(pytest|tox|grep|rg|python manage\.py|python -m pytest)\b", "", norm)
-    norm = re.sub(r"\s+", " ", norm).strip()
-    return " ".join(norm.split()[:18])
 
 
 def _looks_overly_instance_specific(edit: Edit) -> bool:

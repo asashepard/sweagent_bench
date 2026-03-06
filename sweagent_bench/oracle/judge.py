@@ -38,15 +38,12 @@ Return a JSON object with this exact shape:
 }
 
 Rules:
-- Prefer concrete, testable edits over vague advice.
-- Proposed edits are optional.
-- If behavior is already strong enough, return an empty "proposed_edits": [].
-- If behavior has multiple independent gaps, propose multiple edits.
-- Only propose edits you are confident will materially improve future behavior.
+- Use a strict rubric: evidence-first localization, dependency tracing, minimal scoped edits, targeted validation.
+- Penalize speculative breadth (broad refactors, multi-location edits without evidence, invented behavior changes).
+- Proposed edits are optional; return [] if behavior is already strong.
+- Keep edits reusable and repo-level; avoid one-off file paths/commands.
 - Prefer "modify"/"strengthen" over many new "add" rules.
-- Keep edits reusable and repo-level; avoid one-off file-path or one-off command prescriptions.
-- Return at most 3 proposed edits per probe.
-- Do NOT force edits just to fill the list.
+- Return at most 3 proposed edits.
 - Output ONLY valid JSON."""
 
 _JUDGE_USER = """\

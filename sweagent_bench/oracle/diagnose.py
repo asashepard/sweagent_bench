@@ -18,14 +18,12 @@ Output a JSON array of edit objects, each with:
 - "content": the specific text to add, modify, or strengthen
 
 Rules:
-- Be specific and actionable.
-- Prefer "strengthen" or "modify" over adding duplicate rules.
-- Prefer updating existing high-value sections over creating many new sections.
-- Avoid file-instance-specific rules (single bug paths, one-off filenames, exact ad-hoc commands).
-- Focus on reusable repo-level guidance for coding tasks.
-- Edits are optional: if diagnostics indicate guidance is already strong, return [].
-- If there are multiple distinct high-confidence issues, you may return multiple edits.
-- Avoid speculative or low-confidence edits.
+- Keep edits specific and actionable.
+- Focus on reusable repo-level exploration guidance (localize, trace dependencies, validate).
+- Prefer minimal/scoped behavior over broad changes.
+- Avoid one-off file paths/commands and speculative semantics changes.
+- Prefer "modify"/"strengthen" over many new "add" rules.
+- Edits are optional: return [] when confidence is low or guidance is already strong.
 - Return at most 6 edits.
 - Keep the total AGENTS.md under 3,200 characters.
 - Output ONLY the JSON array."""
