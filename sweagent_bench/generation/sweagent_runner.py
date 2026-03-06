@@ -45,6 +45,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 512   # single-shot fallback
 AGENT_MAX_TOKENS = 4096           # per-turn budget in the agent loop
 CMD_TIMEOUT_S = 120               # per-command timeout
 STALL_THRESHOLD = 3               # consecutive identical commands → stall
+PER_COMMAND_OBS_CAP = 4000        # per-command observation cap for message appends
 
 
 def _rlog(msg: str) -> None:
@@ -123,6 +124,46 @@ def _debug_write(debug_dir: Path | None, filename: str, content: str) -> bool:
 def _strip_think_markers(text: str) -> str:
     """Remove literal ``<think>`` / ``</think>`` markers, keep content."""
     return text.replace("<think>", "").replace("</think>", "")
+
+
+def _truncate_head_tail(text: str, max_len: int, head: int, tail: int) -> str:
+    """Truncate text by keeping head+tail with an explicit middle marker."""
+    if len(text) <= max_len:
+        return text
+    return text[:head] + "\n\n... [truncated] ...\n\n" + text[-tail:]
+
+
+def _trim_messages(messages: list[dict], max_turns: int = 8) -> list[dict]:
+    """Keep system + initial task statement + latest conversation turns."""
+    if not messages:
+        return messages
+
+    first_system = None
+    rest_after_system: list[dict]
+    if messages and messages[0].get("role") == "system":
+        first_system = messages[0]
+        rest_after_system = messages[1:]
+    else:
+        rest_after_system = messages[:]
+
+    task_message = None
+    remainder: list[dict]
+    if rest_after_system and rest_after_system[0].get("role") == "user":
+        task_message = rest_after_system[0]
+        remainder = rest_after_system[1:]
+    else:
+        remainder = rest_after_system
+
+    max_tail_messages = max(0, max_turns * 2)
+    tail = remainder[-max_tail_messages:] if max_tail_messages else []
+
+    trimmed: list[dict] = []
+    if first_system is not None:
+        trimmed.append(first_system)
+    if task_message is not None:
+        trimmed.append(task_message)
+    trimmed.extend(tail)
+    return trimmed
 
 
 def _build_agent_messages(
@@ -312,6 +353,7 @@ def _run_agent_loop(
 
             remaining = max(30, int(deadline - time.perf_counter()))
             t_llm = time.perf_counter()
+            messages = _trim_messages(messages, max_turns=8)
             response_text = chat_completion(
                 model=model,
                 messages=messages,
@@ -403,7 +445,13 @@ def _run_agent_loop(
                     f"Step {step+1}: command done in {time.perf_counter() - t_cmd:.2f}s "
                     f"output_chars={len(output)}"
                 )
-                observations.append(f"$ {cmd}\n{output}")
+                output_for_observation = _truncate_head_tail(
+                    output,
+                    max_len=PER_COMMAND_OBS_CAP,
+                    head=2000,
+                    tail=2000,
+                )
+                observations.append(f"$ {cmd}\n{output_for_observation}")
 
             # Debug: write bash commands + outputs
             if _debug_write(
