@@ -4,7 +4,7 @@ from __future__ import annotations
 from sweagent_bench.kb.schema import RepoKB
 
 AGENTS_MD_CHAR_BUDGET = 3000
-MAX_HUB_RULES = 3
+MAX_HUB_RULES = 2
 MAX_ENTRY_RULES = 2
 MAX_INTEGRATION_RULES = 2
 
@@ -17,9 +17,8 @@ def _extract_hub_rules(kb: RepoKB) -> list[str]:
             if len(parts) >= 3:
                 file = parts[0]
                 in_degree = parts[1]
-                importers = parts[2]
                 rules.append(
-                    f"- `{file}` is a high-impact hub ({in_degree} importers); likely impact surface: {importers}."
+                    f"- `{file}` — hub ({in_degree} importers)."
                 )
     return rules[:MAX_HUB_RULES]
 
@@ -36,8 +35,7 @@ def _extract_entry_point_rules(kb: RepoKB) -> list[str]:
             if len(parts) >= 4:
                 file = parts[0]
                 kind = parts[1]
-                classification = parts[2]
-                rules.append(f"- `{file}` is a key entry point ({kind}, {classification}).")
+                rules.append(f"- `{file}` ({kind}).")
         elif in_ep_section and line.startswith("#"):
             break
     return rules[:MAX_ENTRY_RULES]
@@ -45,16 +43,22 @@ def _extract_entry_point_rules(kb: RepoKB) -> list[str]:
 
 def _extract_convention_rules(kb: RepoKB) -> list[str]:
     rules: list[str] = []
+    seen_lower: set[str] = set()
     for line in kb.conventions.splitlines():
         stripped = line.strip()
         if stripped.startswith("- "):
             content = stripped[2:].strip()
-            if "docstring" in content.lower():
-                rules.append(f"- Follow {content} for all new functions/classes.")
-            elif "type hint" in content.lower():
-                rules.append(f"- {content} — maintain this level in new code.")
-            elif "linter" in content.lower() or "formatter" in content.lower():
-                rules.append(f"- {content} — check compliance before submitting.")
+            # Deduplicate near-identical convention bullets
+            norm = content.lower()
+            if norm in seen_lower:
+                continue
+            seen_lower.add(norm)
+            if "docstring" in norm:
+                rules.append(f"- Docstring: {content}.")
+            elif "type hint" in norm:
+                rules.append(f"- {content}.")
+            elif "linter" in norm or "formatter" in norm:
+                rules.append(f"- {content}.")
             else:
                 rules.append(f"- {content}")
     return rules[:3]
@@ -105,23 +109,21 @@ def _extract_import_chain_rules(kb: RepoKB) -> list[str]:
             break
         if in_chains and stripped.startswith("- "):
             rules.append(f"- Chain: {stripped[2:]}")
-    return rules[:3]
+    return rules[:2]
 
 
 def _base_workflow_rules() -> list[str]:
     return [
-        "- Treat repo facts below as priors; verify with targeted file reads before editing.",
-        "- Two-phase workflow: (1) localize and trace dependencies, (2) apply minimal scoped edit.",
-        "- Keep first patch limited to one likely module/hub unless evidence requires expansion.",
-        "- Run the smallest relevant test/check first, then broaden only if needed.",
+        "- Verify repo priors with targeted reads before editing.",
+        "- Localize, trace deps, then apply minimal scoped edit.",
+        "- Run the smallest relevant test first, broaden only if needed.",
     ]
 
 
 def _guardrail_rules() -> list[str]:
     return [
-        "- Avoid speculative behavior changes and broad refactors unless strongly justified by evidence.",
-        "- Avoid unrelated file edits; each touched file should be tied to the diagnosed path.",
-        "- If multiple plausible fixes exist, run one discriminating command/test before editing.",
+        "- No speculative changes or broad refactors without evidence.",
+        "- Every touched file must tie to the diagnosed path.",
     ]
 
 
@@ -133,14 +135,11 @@ def _procedural_scaffold_rules() -> list[str]:
     The oracle_tuned condition is free to exceed or refine these.
     """
     return [
-        "- Reproduce targeted failures before editing when possible.",
-        "- Prefer the smallest discriminating test first.",
-        "- Read target files and nearby callers/callees before patching.",
-        "- Keep first patch minimal and localized to the diagnosed module.",
-        "- Rerun the same targeted test after editing to confirm the fix.",
-        "- Inspect nearby call sites if signatures or public behavior change.",
-        "- Avoid fabricated edits — require evidence from file reads or command output.",
-        "- Ensure patches are syntactically complete and remove unused imports.",
+        "- Reproduce the failure before editing when possible.",
+        "- Read target files and nearby callers before patching.",
+        "- Keep first patch minimal; inspect call sites if public API changes.",
+        "- Require evidence from file reads or command output — no fabricated edits.",
+        "- Patches must be syntactically complete; remove unused imports.",
     ]
 
 

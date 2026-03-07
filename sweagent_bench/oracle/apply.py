@@ -272,13 +272,14 @@ def _section_priority(sec: dict) -> int:
 
 
 def _trim_to_budget(sections: list[dict], budget: int) -> tuple[str, int]:
-    """Pop the longest bullet from any section until under budget.
+    """Remove bullets until under budget, shedding generic sections first.
 
-    This is intentional behavior: the longest bullet globally (across all
-    sections) is removed first, regardless of section priority.  This keeps
-    the algorithm simple and deterministic while avoiding priority-based
-    trimming that could inadvertently preserve low-value verbose content
-    in high-priority sections.
+    Priority order (shed first → last):
+      priority 2  — Operating Mode, Procedural Standards, Guardrails
+      priority 1  — Validation
+      priority 0  — repo-specific (Hubs, Entry Points, Import Chains, etc.)
+
+    Within a priority tier the longest bullet is removed first.
 
     Returns (rendered_str, bullets_removed).
     """
@@ -287,17 +288,25 @@ def _trim_to_budget(sections: list[dict], budget: int) -> tuple[str, int]:
         rendered = _render(sections)
         if len(rendered) <= budget:
             return rendered, removed
-        # Find the single longest bullet across all sections and pop it.
-        longest_line: str = ""
-        longest_sec: dict | None = None
-        longest_idx: int = -1
+
+        # Pick candidate: highest _section_priority first, longest bullet
+        # within that tier.
+        best_line: str = ""
+        best_sec: dict | None = None
+        best_idx: int = -1
+        best_pri: int = -1
         for sec in sections:
+            pri = _section_priority(sec)
             for i, line in enumerate(sec["lines"]):
-                if line.strip().startswith("- ") and len(line) > len(longest_line):
-                    longest_line = line
-                    longest_sec = sec
-                    longest_idx = i
-        if longest_sec is None or longest_idx < 0:
+                if not line.strip().startswith("- "):
+                    continue
+                # Prefer higher priority (shed first), then longest line.
+                if pri > best_pri or (pri == best_pri and len(line) > len(best_line)):
+                    best_line = line
+                    best_sec = sec
+                    best_idx = i
+                    best_pri = pri
+        if best_sec is None or best_idx < 0:
             return rendered[:budget], removed
-        longest_sec["lines"].pop(longest_idx)
+        best_sec["lines"].pop(best_idx)
         removed += 1
