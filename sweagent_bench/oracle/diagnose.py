@@ -13,7 +13,7 @@ and diagnostic probe outcomes. Your goal is to help the assistant produce
 better fixes by proposing targeted edits.
 
 Output a JSON array of edit objects, each with:
-- "section": which AGENTS.md section to edit
+- "section": one of: "Operating Mode", "High-Impact Hubs", "Entry Points", "Import Chains", "Validation", "Integration Risk", "Conventions", "Guardrails"
 - "action": one of "add", "modify", "strengthen", "remove"
 - "content": the specific text to add, modify, or strengthen
 

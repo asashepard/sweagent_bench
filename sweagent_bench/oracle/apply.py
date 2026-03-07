@@ -158,7 +158,7 @@ def apply_edits(
 
     sections = _parse_sections(agents_md)
 
-    # Gate pass: only filter boilerplate; apply everything else.
+    # Gate pass: filter boilerplate and non-canonical edits.
     applied = 0
     dropped = 0
     for edit in edits:
@@ -167,6 +167,9 @@ def apply_edits(
         if not content:
             continue
         if action != "remove" and _is_boilerplate(content):
+            dropped += 1
+            continue
+        if not _is_canonical(edit.section):
             dropped += 1
             continue
         if action == "remove":
@@ -233,9 +236,6 @@ def _find_section(sections: list[dict], name: str) -> dict | None:
 def _add_to_section(sections: list[dict], name: str, content: str) -> None:
     sec = _find_section(sections, name)
     if sec is None:
-        # Section not found — append to the last section in the document.
-        if sections:
-            sections[-1]["lines"].append(f"- {content}")
         return
     sec["lines"].append(f"- {content}")
 

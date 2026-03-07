@@ -29,7 +29,7 @@ Return a JSON object with this exact shape:
         }
     ],
     "proposed_edits": [
-        {"section": "...", "action": "add|modify|strengthen|remove", "content": "..."}
+        {"section": "Operating Mode|High-Impact Hubs|Entry Points|Import Chains|Validation|Integration Risk|Conventions|Guardrails", "action": "add|modify|strengthen|remove", "content": "..."}
     ],
     "overall_notes": "short summary"
 }

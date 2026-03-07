@@ -184,6 +184,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
 
     no_change_streak = 0
     all_prior_probe_tasks: list[str] = []
+    all_prior_probe_sigs: set[str] = set()
 
     start_iter = state.completed_iterations + 1
     for t in range(start_iter, config.iterations + 1):
@@ -213,7 +214,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         duplicate_probe_count = 0
         for probe in generated_probes:
             sig = _probe_signature(probe.task)
-            if sig in iteration_probe_signatures:
+            if sig in iteration_probe_signatures or sig in all_prior_probe_sigs:
                 duplicate_probe_count += 1
                 continue
             iteration_probe_signatures.add(sig)
@@ -238,7 +239,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             generated_probes.extend(topup_batch)
             for probe in topup_batch:
                 sig = _probe_signature(probe.task)
-                if sig in iteration_probe_signatures:
+                if sig in iteration_probe_signatures or sig in all_prior_probe_sigs:
                     duplicate_probe_count += 1
                     continue
                 iteration_probe_signatures.add(sig)
@@ -246,6 +247,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
                 deduped_probes.append(probe)
 
         all_prior_probe_tasks.extend(iteration_probe_tasks)
+        all_prior_probe_sigs.update(iteration_probe_signatures)
 
         target_probes_met = len(deduped_probes) >= TARGET_PROBES_PER_ITERATION
         _olog(
