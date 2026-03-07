@@ -36,7 +36,6 @@ Return a JSON object with this exact shape:
 
 Rules:
 - Judge whether the response produced a focused, plausible fix grounded in repo evidence.
-- Reward good use of repo-specific structure when relevant.
 - Prefer edits that improve repo-specific guidance, not generic checklists.
 - Edits are optional; return [] if behavior is already strong.
 - Return at most 3 proposed edits.
