@@ -4,9 +4,9 @@ from __future__ import annotations
 from sweagent_bench.kb.schema import RepoKB
 
 AGENTS_MD_CHAR_BUDGET = 3000
-MAX_HUB_RULES = 3
-MAX_ENTRY_RULES = 2
-MAX_INTEGRATION_RULES = 2
+MAX_HUB_RULES = 5
+MAX_ENTRY_RULES = 4
+MAX_INTEGRATION_RULES = 3
 
 
 def _extract_hub_rules(kb: RepoKB) -> list[str]:
@@ -57,7 +57,7 @@ def _extract_convention_rules(kb: RepoKB) -> list[str]:
                 rules.append(f"- {content} — check compliance before submitting.")
             else:
                 rules.append(f"- {content}")
-    return rules[:3]
+    return rules[:5]
 
 
 def _extract_test_rules(kb: RepoKB) -> list[str]:
@@ -72,7 +72,9 @@ def _extract_test_rules(kb: RepoKB) -> list[str]:
             rules.append(f"- {stripped.lstrip('- ')}")
         elif "conftest" in stripped.lower():
             rules.append(f"- {stripped.lstrip('- ')}")
-    return rules[:2]
+        elif "fixture" in stripped.lower():
+            rules.append(f"- {stripped.lstrip('- ')}")
+    return rules[:4]
 
 
 def _extract_integration_rules(kb: RepoKB) -> list[str]:
@@ -88,6 +90,22 @@ def _extract_integration_rules(kb: RepoKB) -> list[str]:
         if in_integration and stripped.startswith("- "):
             rules.append(f"- {stripped[2:]}")
     return rules[:MAX_INTEGRATION_RULES]
+
+
+def _extract_import_chain_rules(kb: RepoKB) -> list[str]:
+    """Extract import chain rules from the context section."""
+    rules: list[str] = []
+    in_chains = False
+    for line in kb.context.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("### Import Chains"):
+            in_chains = True
+            continue
+        if in_chains and stripped.startswith("### "):
+            break
+        if in_chains and stripped.startswith("- "):
+            rules.append(f"- Chain: {stripped[2:]}")
+    return rules[:4]
 
 
 def _base_workflow_rules() -> list[str]:
@@ -121,7 +139,10 @@ def render_agents_md(kb: RepoKB) -> str:
     test_rules = _extract_test_rules(kb)
     conv_rules = _extract_convention_rules(kb)
 
-    if hub_rules or ep_rules or integration_rules or test_rules or conv_rules:
+    chain_rules = _extract_import_chain_rules(kb)
+
+    has_priors = hub_rules or ep_rules or integration_rules or test_rules or conv_rules or chain_rules
+    if has_priors:
         lines.append("## Repo Priors")
     if hub_rules:
         lines.append("### High-Impact Hubs")
@@ -129,6 +150,9 @@ def render_agents_md(kb: RepoKB) -> str:
     if ep_rules:
         lines.append("### Entry Points")
         lines.extend(ep_rules)
+    if chain_rules:
+        lines.append("### Import Chains")
+        lines.extend(chain_rules)
     if test_rules:
         lines.append("### Validation")
         lines.extend(test_rules)

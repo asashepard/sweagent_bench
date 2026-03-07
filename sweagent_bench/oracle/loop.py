@@ -41,8 +41,8 @@ Return ONLY valid JSON with this shape:
 
 Rules:
 - Select up to {max_edits} candidates by index.
-- Strongly prefer edits that sharpen repo-specific priors (hubs, entry points,
-  import chains, test infrastructure, conventions) already in AGENTS.md.
+- Prefer edits that improve practical fix quality: clearer localization,
+  dependency awareness, scoped changes, and stronger use of repo priors when useful.
 - Deprioritize generic process rules (e.g. "always validate", "document reasoning").
 - Avoid duplicates/near-duplicates and overly instance-specific suggestions.
 - Do not invent new indices.

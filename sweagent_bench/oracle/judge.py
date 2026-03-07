@@ -35,15 +35,10 @@ Return a JSON object with this exact shape:
 }
 
 Rules:
-- Judge whether the response used repo-specific structure (hubs, entry points,
-  import chains, test infrastructure) to arrive at a focused fix.
-- "strong" = the assistant leveraged repo priors to localize accurately and
-  made a minimal, well-scoped change. Do not require process narration.
-- Penalize broad refactors or multi-file edits unsupported by evidence, but
-  do not penalize omission of generic process steps.
-- Proposed edits should sharpen how AGENTS.md helps the assistant use *this*
-  repo's structure, not add generic engineering checklists.
-- Prefer "modify"/"strengthen" over new "add" rules.
+- Judge whether the response produced a focused, plausible fix grounded in repo evidence.
+- Reward good use of repo-specific structure when relevant.
+- Prefer edits that improve repo-specific guidance, not generic checklists.
+- Edits are optional; return [] if behavior is already strong.
 - Return at most 3 proposed edits.
 - Output ONLY valid JSON."""
 

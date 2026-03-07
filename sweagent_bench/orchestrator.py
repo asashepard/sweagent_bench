@@ -29,6 +29,7 @@ from sweagent_bench.oracle.loop import run_oracle_loop
 from sweagent_bench.oracle.schema import OracleConfig
 from sweagent_bench.generation.patch_utils import normalize_and_validate_patch, sanitize_patch_for_preds
 from sweagent_bench.generation.sweagent_runner import generate_patch_with_sweagent
+from sweagent_bench.kb.agents_md import AGENTS_MD_CHAR_BUDGET
 from sweagent_bench.utils.jsonl import read_jsonl
 from sweagent_bench.utils.paths import PREDS_DIR, PROJECT_ROOT, RESULTS_DIR
 from sweagent_bench.utils.subproc import run as subproc_run
@@ -327,6 +328,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
 
         repo_keys_to_mark: list[str] = []
         generation_jobs: list[tuple[str, dict, str | None]] = []
+        guidance_char_counts: dict[str, int] = {}  # repo -> chars actually used
 
         for repo, instances in instances_by_repo.items():
             key = f"{repo}__{condition}"
@@ -342,6 +344,9 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 repo_guidance = guidance_map.get(repo, {}).get(condition)
                 if repo_guidance is not None:
                     guidance_text = repo_guidance.render()
+                    if len(guidance_text) > AGENTS_MD_CHAR_BUDGET:
+                        guidance_text = guidance_text[:AGENTS_MD_CHAR_BUDGET - 20] + "\n[... truncated]"
+                    guidance_char_counts[repo] = len(guidance_text)
                     _elog(
                         f"Condition {condition}: guidance loaded for {repo} "
                         f"(chars={len(guidance_text)})"
@@ -633,7 +638,14 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
             "preds_path": str(cond_preds_path),
             "instance_metrics_path": str(cond_metrics_path),
             "generation_metrics": generation_metrics,
+            "guidance_char_counts": guidance_char_counts,
         }
+        total_guidance_chars = sum(guidance_char_counts.values())
+        avg_guidance_chars = (total_guidance_chars / len(guidance_char_counts)) if guidance_char_counts else 0
+        _elog(
+            f"Condition {condition}: guidance chars by repo={guidance_char_counts} "
+            f"avg={avg_guidance_chars:.0f}"
+        )
         if load_error is not None:
             eval_results[condition]["error"] = load_error
 
