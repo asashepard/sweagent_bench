@@ -207,7 +207,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         "model": config.model,
         "oracle_iterations_planned": config.iterations,
         "temperatures": {
-            "probe_generation": 0.7,
+            "probe_generation": 0.9,
             "probe_execution": 0.0,
             "judge": 0.0,
             "diagnose": 0.0,
@@ -251,6 +251,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
     )
 
     no_change_streak = 0
+    probe_exhaustion_streak = 0
     all_prior_probe_tasks: list[str] = []
     all_prior_probe_sigs: set[str] = set()
 
@@ -292,7 +293,8 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         topup_attempts = 0
         while len(deduped_probes) < TARGET_PROBES_PER_ITERATION and topup_attempts < MAX_PROBE_TOPUP_ATTEMPTS:
             remaining = TARGET_PROBES_PER_ITERATION - len(deduped_probes)
-            generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(iteration_probe_tasks)]
+            topup_prior_tasks = all_prior_probe_tasks + iteration_probe_tasks
+            generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(topup_prior_tasks)]
             topup_batch = generate_probes(
                 kb,
                 config.model,
@@ -411,12 +413,14 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
 
         no_change_counted = False
         if probe_count_evaluated == 0:
+            probe_exhaustion_streak += 1
             no_change_streak = 0
         elif not edits or not guidance_changed:
             no_change_counted = True
             no_change_streak += 1
         else:
             no_change_streak = 0
+            probe_exhaustion_streak = 0
 
         summary: dict = {
             "probe_count_generated": len(generated_probes),
@@ -429,8 +433,9 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             "no_change_counted": no_change_counted,
             "probe_execution_mode": ORACLE_PROBE_EXECUTION_MODE,
             "effective_probe_timeout_s": effective_probe_timeout_s,
-            "probe_dedup_scope": "iteration_local",
+            "probe_dedup_scope": "cross_iteration",
             "topup_attempts": topup_attempts,
+            "probe_exhaustion_streak": probe_exhaustion_streak,
             "guidance_chars_before": guidance_chars_before,
             "guidance_chars_after": guidance_chars_after,
             "budget_trimmed": budget_trimmed,
@@ -479,6 +484,21 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
 
         _olog(f"Iteration {t} complete in {time.perf_counter() - iter_start:.2f}s; saved v{new_version}")
 
+        if probe_exhaustion_streak >= 2:
+            stop_reason = "2 consecutive iterations with 0 probes after dedup (probe diversity exhausted)"
+            _olog(f"Iteration {t}: stopping oracle early ({stop_reason})")
+            final_summary_path = out / f"iteration_{t}_summary.json"
+            try:
+                final_summary = json.loads(final_summary_path.read_text(encoding="utf-8"))
+            except Exception:
+                final_summary = summary
+            final_summary["stop_reason"] = stop_reason
+            final_summary_path.write_text(
+                json.dumps(final_summary, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            break
+
         if no_change_streak >= 2:
             stop_reason = "2 consecutive no-change iterations with evaluated probes"
             _olog(f"Iteration {t}: stopping oracle early ({stop_reason})")
@@ -503,7 +523,9 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
 
     # Update provenance metadata with completion info
     early_stop_reason = None
-    if no_change_streak >= 2:
+    if probe_exhaustion_streak >= 2:
+        early_stop_reason = "2 consecutive iterations with 0 probes after dedup (probe diversity exhausted)"
+    elif no_change_streak >= 2:
         early_stop_reason = "2 consecutive no-change iterations with evaluated probes"
     try:
         provenance_data = json.loads(provenance_path.read_text(encoding="utf-8"))
