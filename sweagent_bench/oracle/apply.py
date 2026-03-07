@@ -114,21 +114,51 @@ def _is_canonical(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Edit priority — repo-specific sections consume budget first
+# ---------------------------------------------------------------------------
+
+# Sections whose content is inherently repo-specific.
+_REPO_SPECIFIC_SECTIONS = {
+    "high-impact hubs",
+    "entry points",
+    "import chains",
+    "integration risk",
+    "conventions",
+}
+
+
+def _edit_priority(edit: Edit) -> int:
+    """Lower value = higher priority. Repo-specific first, generic last."""
+    canon = _normalize_section_name(edit.section)
+    if canon in _REPO_SPECIFIC_SECTIONS:
+        return 0
+    if canon == "validation":
+        return 1
+    return 2  # operating mode, guardrails, repo priors
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def apply_edits(
     agents_md: str, edits: list[Edit], model: str = "", *, timeout_s: int = 120,
 ) -> tuple[str, dict]:
-    """Mechanically apply edits to AGENTS.md. Always succeeds."""
+    """Mechanically apply edits to AGENTS.md. Always succeeds.
+
+    All valid edits are applied unconditionally. If the result exceeds
+    AGENTS_MD_CHAR_BUDGET, bullets are trimmed from the lowest-priority
+    (most generic) sections first, preserving repo-specific content.
+    """
     if not edits:
         return agents_md, {
             "accepted": True, "edits_applied": 0,
-            "over_budget_trimmed": False, "edits_dropped": 0,
+            "edits_dropped": 0, "budget_trimmed": 0,
         }
 
     sections = _parse_sections(agents_md)
 
+    # Gate pass: filter boilerplate and non-canonical edits.
     applied = 0
     dropped = 0
     for edit in edits:
@@ -136,29 +166,26 @@ def apply_edits(
         content = edit.content.strip()
         if not content:
             continue
-        # Gate 1: boilerplate filter
         if action != "remove" and _is_boilerplate(content):
             dropped += 1
             continue
-        # Gate 2: section must resolve to a canonical section
         if not _is_canonical(edit.section):
             dropped += 1
             continue
         if action == "remove":
             _remove_from_section(sections, edit.section, content)
-        else:  # add, modify, strengthen → insert bullet
+        else:
             _add_to_section(sections, edit.section, content)
         applied += 1
 
     result = _render(sections)
-    trimmed = False
+    budget_trimmed = 0
     if len(result) > AGENTS_MD_CHAR_BUDGET:
-        result = _trim_to_budget(sections, AGENTS_MD_CHAR_BUDGET)
-        trimmed = True
+        result, budget_trimmed = _trim_to_budget(sections, AGENTS_MD_CHAR_BUDGET)
 
     return result, {
         "accepted": True, "edits_applied": applied,
-        "over_budget_trimmed": trimmed, "edits_dropped": dropped,
+        "edits_dropped": dropped, "budget_trimmed": budget_trimmed,
     }
 
 
@@ -230,18 +257,39 @@ def _remove_from_section(sections: list[dict], name: str, content: str) -> None:
 # Budget enforcement
 # ---------------------------------------------------------------------------
 
-def _trim_to_budget(sections: list[dict], budget: int) -> str:
-    """Remove last bullet from longest section until under budget."""
+def _section_priority(sec: dict) -> int:
+    """Priority of a parsed section. Higher value = shed first."""
+    title_text = re.sub(r"^#{1,3}\s+", "", sec["title"]).strip().lower()
+    if title_text in _REPO_SPECIFIC_SECTIONS:
+        return 0   # shed last
+    if title_text == "validation":
+        return 1
+    return 2       # operating mode, guardrails — shed first
+
+
+def _trim_to_budget(sections: list[dict], budget: int) -> tuple[str, int]:
+    """Pop bullets from generic sections first until under budget.
+
+    Returns (rendered_str, bullets_removed).
+    """
+    removed = 0
     while True:
         rendered = _render(sections)
         if len(rendered) <= budget:
-            return rendered
-        # find section with most content chars
-        content_secs = [s for s in sections if s["lines"] and any(l.strip() for l in s["lines"])]
-        if not content_secs:
-            # headers alone exceed budget — hard truncate
-            return rendered[:budget]
-        longest = max(content_secs, key=lambda s: sum(len(l) for l in s["lines"]))
-        if not longest["lines"]:
-            return rendered[:budget]
-        longest["lines"].pop()
+            return rendered, removed
+        # Collect sections that have strippable content, sorted so
+        # lowest-priority (most generic) come first.
+        strippable = [
+            s for s in sections
+            if s["lines"] and any(l.strip() for l in s["lines"])
+        ]
+        if not strippable:
+            return rendered[:budget], removed
+        # Among the lowest-priority tier, pick the section with
+        # the most content so trimming converges quickly.
+        strippable.sort(key=lambda s: (-_section_priority(s), -sum(len(l) for l in s["lines"])))
+        target = strippable[0]
+        if not target["lines"]:
+            return rendered[:budget], removed
+        target["lines"].pop()
+        removed += 1

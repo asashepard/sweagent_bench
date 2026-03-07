@@ -316,9 +316,9 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             t_apply = time.perf_counter()
             before_agents_md = agents_md
             agents_md, apply_meta = apply_edits(agents_md, edits, config.model)
-            trimmed = bool(apply_meta.get("over_budget_trimmed", False))
-            guidance_chars_before_trim = len(before_agents_md)
-            guidance_chars_after_trim = len(agents_md)
+            guidance_chars_before = len(before_agents_md)
+            guidance_chars_after = len(agents_md)
+            budget_trimmed = apply_meta.get("budget_trimmed", 0)
             # Count edits per canonical section
             edit_section_counts: dict[str, int] = {}
             for edit in edits:
@@ -326,15 +326,16 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
                 edit_section_counts[canon] = edit_section_counts.get(canon, 0) + 1
             _olog(
                 f"Iteration {t}: apply complete in {time.perf_counter() - t_apply:.4f}s "
-                f"edits_applied={apply_meta.get('edits_applied', 0)} trimmed={trimmed} "
-                f"len={guidance_chars_before_trim}->{guidance_chars_after_trim} "
-                f"(delta={guidance_chars_after_trim - guidance_chars_before_trim}) "
+                f"edits_applied={apply_meta.get('edits_applied', 0)} "
+                f"dropped={apply_meta.get('edits_dropped', 0)} "
+                f"budget_trimmed={budget_trimmed} "
+                f"len={guidance_chars_before}->{guidance_chars_after} "
                 f"section_counts={edit_section_counts}"
             )
         else:
-            guidance_chars_before_trim = len(agents_md)
-            guidance_chars_after_trim = len(agents_md)
-            trimmed = False
+            guidance_chars_before = len(agents_md)
+            guidance_chars_after = len(agents_md)
+            budget_trimmed = 0
             edit_section_counts = {}
             _olog(f"Iteration {t}: no edits applied (reason=no_selected_edits)")
 
@@ -364,9 +365,9 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             "effective_probe_timeout_s": effective_probe_timeout_s,
             "probe_dedup_scope": "iteration_local",
             "topup_attempts": topup_attempts,
-            "guidance_chars_before_trim": guidance_chars_before_trim,
-            "guidance_chars_after_trim": guidance_chars_after_trim,
-            "over_budget_trimmed": trimmed,
+            "guidance_chars_before": guidance_chars_before,
+            "guidance_chars_after": guidance_chars_after,
+            "budget_trimmed": budget_trimmed,
             "edit_section_counts": edit_section_counts,
         }
         if iter_stop_reason:
