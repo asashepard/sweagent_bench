@@ -183,6 +183,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
     )
 
     no_change_streak = 0
+    all_prior_probe_tasks: list[str] = []
 
     start_iter = state.completed_iterations + 1
     for t in range(start_iter, config.iterations + 1):
@@ -199,7 +200,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         t_probe_gen = time.perf_counter()
         iteration_probe_signatures: set[str] = set()
         iteration_probe_tasks: list[str] = []
-        generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(iteration_probe_tasks)]
+        generation_prior = [Probe(id=f"prior_{i}", task=task) for i, task in enumerate(all_prior_probe_tasks)]
         generated_probes = generate_probes(
             kb,
             config.model,
@@ -243,6 +244,8 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
                 iteration_probe_signatures.add(sig)
                 iteration_probe_tasks.append(probe.task)
                 deduped_probes.append(probe)
+
+        all_prior_probe_tasks.extend(iteration_probe_tasks)
 
         target_probes_met = len(deduped_probes) >= TARGET_PROBES_PER_ITERATION
         _olog(
@@ -289,14 +292,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         raw_edits = [*direct_edits, *llm_edits]
         deduped_edits = _dedupe_edits(raw_edits)
         _olog(f"Iteration {t}: deduped edits={len(deduped_edits)}")
-        edits = _prioritize_edits_for_iteration(
-            raw_edits=raw_edits,
-            deduped_edits=deduped_edits,
-            current_agents_md=agents_md,
-            max_edits=MAX_EDITS_PER_ITERATION,
-            model=config.model,
-            timeout_s=config.timeout_s,
-        )
+        edits = deduped_edits[:MAX_EDITS_PER_ITERATION]
         _olog(
             f"Iteration {t}: prioritized edits={len(edits)} "
             f"(cap={MAX_EDITS_PER_ITERATION}, soft_budget={SOFT_CHAR_BUDGET})"
