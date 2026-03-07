@@ -9,8 +9,8 @@ from sweagent_bench.oracle.schema import Edit, ProbeResult
 
 _DIAGNOSE_SYSTEM = """\
 You are an expert AGENTS.md editor. You will be given the current AGENTS.md
-and diagnostic probe outcomes. Your goal is to improve future assistant
-behavior by proposing targeted edits.
+and diagnostic probe outcomes. Your goal is to help the assistant produce
+better fixes by sharpening how it uses repo-specific structure and facts.
 
 Output a JSON array of edit objects, each with:
 - "section": which AGENTS.md section to edit
@@ -18,12 +18,13 @@ Output a JSON array of edit objects, each with:
 - "content": the specific text to add, modify, or strengthen
 
 Rules:
-- Keep edits specific and actionable.
-- Focus on reusable repo-level exploration guidance (localize, trace dependencies, validate).
-- Prefer minimal/scoped behavior over broad changes.
-- Avoid one-off file paths/commands and speculative semantics changes.
-- Prefer "modify"/"strengthen" over many new "add" rules.
-- Edits are optional: return [] when confidence is low or guidance is already strong.
+- Prioritize edits that sharpen repo-specific priors already in AGENTS.md
+  (hubs, entry points, import chains, test commands, conventions).
+- Prefer edits that help the assistant navigate *this* repo's structure
+  over generic software-engineering process rules.
+- Use "modify"/"strengthen" to refine existing guidance before adding new rules.
+- Avoid generic checklist items (e.g. "always validate", "document root cause").
+- Edits are optional: return [] when guidance is already strong.
 - Return at most 6 edits.
 - Keep the total AGENTS.md under 3,000 characters.
 - Output ONLY the JSON array."""

@@ -15,6 +15,7 @@ from sweagent_bench.kb.builder import build_kb
 from sweagent_bench.kb.schema import RepoKB
 from sweagent_bench.llm.openai_compat import chat_completion
 from sweagent_bench.oracle.apply import apply_edits
+from sweagent_bench.oracle.apply import _normalize_section_name
 from sweagent_bench.oracle.diagnose import diagnose_failures
 from sweagent_bench.oracle.judge import evaluate_probe
 from sweagent_bench.oracle.probes import generate_probes
@@ -40,9 +41,10 @@ Return ONLY valid JSON with this shape:
 
 Rules:
 - Select up to {max_edits} candidates by index.
-- Prefer reusable repo-level guidance, minimal scope, and high-signal improvements.
-- Avoid duplicates/near-duplicates and avoid overly instance-specific suggestions.
-- Prefer edits that improve evidence-first localization, dependency tracing, and targeted validation.
+- Strongly prefer edits that sharpen repo-specific priors (hubs, entry points,
+  import chains, test infrastructure, conventions) already in AGENTS.md.
+- Deprioritize generic process rules (e.g. "always validate", "document reasoning").
+- Avoid duplicates/near-duplicates and overly instance-specific suggestions.
 - Do not invent new indices.
 """
 
@@ -265,7 +267,11 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             _olog(f"Iteration {t}: no probes kept after dedup; continuing with empty result set")
 
         t_eval = time.perf_counter()
-        results = _evaluate_all_probes_detailed(agents_md, deduped_probes, config)
+        # Cap agents_md to the same budget used by the main agent path
+        probe_agents_md = agents_md
+        if len(probe_agents_md) > AGENTS_MD_CHAR_BUDGET:
+            probe_agents_md = probe_agents_md[:AGENTS_MD_CHAR_BUDGET - 20] + "\n[... truncated]"
+        results = _evaluate_all_probes_detailed(probe_agents_md, deduped_probes, config)
         probe_count_evaluated = len(results)
         _olog(
             f"Iteration {t}: evaluated {len(results)} probes in "
@@ -311,13 +317,25 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             before_agents_md = agents_md
             agents_md, apply_meta = apply_edits(agents_md, edits, config.model)
             trimmed = bool(apply_meta.get("over_budget_trimmed", False))
+            guidance_chars_before_trim = len(before_agents_md)
+            guidance_chars_after_trim = len(agents_md)
+            # Count edits per canonical section
+            edit_section_counts: dict[str, int] = {}
+            for edit in edits:
+                canon = _normalize_section_name(edit.section)
+                edit_section_counts[canon] = edit_section_counts.get(canon, 0) + 1
             _olog(
                 f"Iteration {t}: apply complete in {time.perf_counter() - t_apply:.4f}s "
                 f"edits_applied={apply_meta.get('edits_applied', 0)} trimmed={trimmed} "
-                f"len={len(before_agents_md)}->{len(agents_md)} "
-                f"(delta={len(agents_md) - len(before_agents_md)})"
+                f"len={guidance_chars_before_trim}->{guidance_chars_after_trim} "
+                f"(delta={guidance_chars_after_trim - guidance_chars_before_trim}) "
+                f"section_counts={edit_section_counts}"
             )
         else:
+            guidance_chars_before_trim = len(agents_md)
+            guidance_chars_after_trim = len(agents_md)
+            trimmed = False
+            edit_section_counts = {}
             _olog(f"Iteration {t}: no edits applied (reason=no_selected_edits)")
 
         guidance_changed = agents_md != guidance_before
@@ -345,7 +363,11 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             "probe_execution_mode": ORACLE_PROBE_EXECUTION_MODE,
             "effective_probe_timeout_s": effective_probe_timeout_s,
             "probe_dedup_scope": "iteration_local",
-            "over_budget_trimmed": bool(apply_meta.get("over_budget_trimmed", False)) if edits else False,
+            "topup_attempts": topup_attempts,
+            "guidance_chars_before_trim": guidance_chars_before_trim,
+            "guidance_chars_after_trim": guidance_chars_after_trim,
+            "over_budget_trimmed": trimmed,
+            "edit_section_counts": edit_section_counts,
         }
         if iter_stop_reason:
             summary["stop_reason"] = iter_stop_reason

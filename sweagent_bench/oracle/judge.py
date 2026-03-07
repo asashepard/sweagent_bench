@@ -35,11 +35,15 @@ Return a JSON object with this exact shape:
 }
 
 Rules:
-- Use a strict rubric: evidence-first localization, dependency tracing, minimal scoped edits, targeted validation.
-- Penalize speculative breadth (broad refactors, multi-location edits without evidence, invented behavior changes).
-- Proposed edits are optional; return [] if behavior is already strong.
-- Keep edits reusable and repo-level; avoid one-off file paths/commands.
-- Prefer "modify"/"strengthen" over many new "add" rules.
+- Judge whether the response used repo-specific structure (hubs, entry points,
+  import chains, test infrastructure) to arrive at a focused fix.
+- "strong" = the assistant leveraged repo priors to localize accurately and
+  made a minimal, well-scoped change. Do not require process narration.
+- Penalize broad refactors or multi-file edits unsupported by evidence, but
+  do not penalize omission of generic process steps.
+- Proposed edits should sharpen how AGENTS.md helps the assistant use *this*
+  repo's structure, not add generic engineering checklists.
+- Prefer "modify"/"strengthen" over new "add" rules.
 - Return at most 3 proposed edits.
 - Output ONLY valid JSON."""
 
