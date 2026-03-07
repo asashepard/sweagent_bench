@@ -207,7 +207,7 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
         "model": config.model,
         "oracle_iterations_planned": config.iterations,
         "temperatures": {
-            "probe_generation": 0.0,
+            "probe_generation": 0.7,
             "probe_execution": 0.0,
             "judge": 0.0,
             "diagnose": 0.0,
