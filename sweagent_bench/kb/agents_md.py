@@ -109,12 +109,11 @@ def _guardrail_rules() -> list[str]:
 
 def render_agents_md(kb: RepoKB) -> str:
     """Render a compact, exploration-first AGENTS.md from RepoKB. Deterministic."""
-    sections: list[str] = []
+    lines: list[str] = []
 
-    sections.append(f"# AGENTS.md — {kb.repo}\n")
-
-    sections.append("## Operating Mode\n")
-    sections.append("\n".join(_base_workflow_rules()))
+    lines.append(f"# AGENTS.md — {kb.repo}")
+    lines.append("## Operating Mode")
+    lines.extend(_base_workflow_rules())
 
     hub_rules = _extract_hub_rules(kb)
     ep_rules = _extract_entry_point_rules(kb)
@@ -123,29 +122,29 @@ def render_agents_md(kb: RepoKB) -> str:
     conv_rules = _extract_convention_rules(kb)
 
     if hub_rules or ep_rules or integration_rules or test_rules or conv_rules:
-        sections.append("\n## Repo Priors\n")
+        lines.append("## Repo Priors")
     if hub_rules:
-        sections.append("### High-Impact Hubs")
-        sections.append("\n".join(hub_rules))
+        lines.append("### High-Impact Hubs")
+        lines.extend(hub_rules)
     if ep_rules:
-        sections.append("\n### Entry Points")
-        sections.append("\n".join(ep_rules))
+        lines.append("### Entry Points")
+        lines.extend(ep_rules)
     if test_rules:
-        sections.append("\n### Validation")
-        sections.append("\n".join(test_rules))
+        lines.append("### Validation")
+        lines.extend(test_rules)
     if integration_rules:
-        sections.append("\n### Integration Risk")
-        sections.append("\n".join(integration_rules))
+        lines.append("### Integration Risk")
+        lines.extend(integration_rules)
     if conv_rules:
-        sections.append("\n### Conventions")
-        sections.append("\n".join(conv_rules))
+        lines.append("### Conventions")
+        lines.extend(conv_rules)
 
-    sections.append("\n## Guardrails\n")
-    sections.append("\n".join(_guardrail_rules()))
+    lines.append("## Guardrails")
+    lines.extend(_guardrail_rules())
 
-    result = "\n".join(sections)
+    result = "\n".join(lines) + "\n"
 
     if len(result) > AGENTS_MD_CHAR_BUDGET:
-        result = result[:AGENTS_MD_CHAR_BUDGET - 20] + "\n\n[... truncated]"
+        result = result[:AGENTS_MD_CHAR_BUDGET - 20] + "\n[... truncated]"
 
     return result

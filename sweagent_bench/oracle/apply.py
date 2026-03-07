@@ -75,8 +75,39 @@ def _render(sections: list[dict]) -> str:
 # Edit operations
 # ---------------------------------------------------------------------------
 
+# Canonical aliases — maps common LLM-generated section names to the
+# standard heading used in the static KB so edits merge instead of sprawling.
+_SECTION_ALIASES: dict[str, str] = {
+    "code change requirements": "operating mode",
+    "code change protocol": "operating mode",
+    "change protocol": "operating mode",
+    "workflow": "operating mode",
+    "exploration strategy": "operating mode",
+    "localization": "operating mode",
+    "dependency tracing": "operating mode",
+    "general": "operating mode",
+    "guardrail": "guardrails",
+    "guard rails": "guardrails",
+    "safety": "guardrails",
+    "constraints": "guardrails",
+    "validation": "repo priors",
+    "testing": "repo priors",
+    "test strategy": "repo priors",
+    "conventions": "repo priors",
+    "integration risk": "repo priors",
+    "high-impact hubs": "repo priors",
+    "entry points": "repo priors",
+}
+
+
+def _normalize_section_name(name: str) -> str:
+    """Resolve aliases to canonical section names."""
+    key = name.lower().strip()
+    return _SECTION_ALIASES.get(key, key)
+
+
 def _find_section(sections: list[dict], name: str) -> dict | None:
-    target = name.lower().strip()
+    target = _normalize_section_name(name)
     for sec in sections:
         title_text = re.sub(r"^#{1,3}\s+", "", sec["title"]).strip().lower()
         # exact match or substring
