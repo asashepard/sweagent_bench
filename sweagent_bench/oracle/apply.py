@@ -1,11 +1,11 @@
 """Apply structured edits to AGENTS.md via mechanical section editing.
 
 No LLM calls. Parses markdown sections, inserts/removes bullets,
-enforces character budget by trimming longest sections. Deterministic,
-cannot fail, cannot produce reasoning contamination.
+enforces character budget by trimming the longest bullets first.
+Deterministic, cannot fail, cannot produce reasoning contamination.
 
-Edits are constrained to canonical static-KB sections. Edits targeting
-unknown sections are remapped via aliases or dropped. Edits containing
+Edits targeting known sections are merged in; edits targeting unknown
+sections are appended to the end of the document. Edits containing
 benchmark/pipeline boilerplate are filtered out.
 """
 from __future__ import annotations
@@ -158,7 +158,7 @@ def apply_edits(
 
     sections = _parse_sections(agents_md)
 
-    # Gate pass: filter boilerplate and non-canonical edits.
+    # Gate pass: only filter boilerplate; apply everything else.
     applied = 0
     dropped = 0
     for edit in edits:
@@ -167,9 +167,6 @@ def apply_edits(
         if not content:
             continue
         if action != "remove" and _is_boilerplate(content):
-            dropped += 1
-            continue
-        if not _is_canonical(edit.section):
             dropped += 1
             continue
         if action == "remove":
@@ -236,8 +233,9 @@ def _find_section(sections: list[dict], name: str) -> dict | None:
 def _add_to_section(sections: list[dict], name: str, content: str) -> None:
     sec = _find_section(sections, name)
     if sec is None:
-        # Section doesn't exist in the document — drop silently.
-        # Canonical-section gate already ran in apply_edits().
+        # Section not found — append to the last section in the document.
+        if sections:
+            sections[-1]["lines"].append(f"- {content}")
         return
     sec["lines"].append(f"- {content}")
 
@@ -268,7 +266,7 @@ def _section_priority(sec: dict) -> int:
 
 
 def _trim_to_budget(sections: list[dict], budget: int) -> tuple[str, int]:
-    """Pop bullets from generic sections first until under budget.
+    """Pop the longest bullet from any section until under budget.
 
     Returns (rendered_str, bullets_removed).
     """
@@ -277,19 +275,17 @@ def _trim_to_budget(sections: list[dict], budget: int) -> tuple[str, int]:
         rendered = _render(sections)
         if len(rendered) <= budget:
             return rendered, removed
-        # Collect sections that have strippable content, sorted so
-        # lowest-priority (most generic) come first.
-        strippable = [
-            s for s in sections
-            if s["lines"] and any(l.strip() for l in s["lines"])
-        ]
-        if not strippable:
+        # Find the single longest bullet across all sections and pop it.
+        longest_line: str = ""
+        longest_sec: dict | None = None
+        longest_idx: int = -1
+        for sec in sections:
+            for i, line in enumerate(sec["lines"]):
+                if line.strip().startswith("- ") and len(line) > len(longest_line):
+                    longest_line = line
+                    longest_sec = sec
+                    longest_idx = i
+        if longest_sec is None or longest_idx < 0:
             return rendered[:budget], removed
-        # Among the lowest-priority tier, pick the section with
-        # the most content so trimming converges quickly.
-        strippable.sort(key=lambda s: (-_section_priority(s), -sum(len(l) for l in s["lines"])))
-        target = strippable[0]
-        if not target["lines"]:
-            return rendered[:budget], removed
-        target["lines"].pop()
+        longest_sec["lines"].pop(longest_idx)
         removed += 1

@@ -4,9 +4,9 @@ from __future__ import annotations
 from sweagent_bench.kb.schema import RepoKB
 
 AGENTS_MD_CHAR_BUDGET = 3000
-MAX_HUB_RULES = 5
-MAX_ENTRY_RULES = 4
-MAX_INTEGRATION_RULES = 3
+MAX_HUB_RULES = 3
+MAX_ENTRY_RULES = 2
+MAX_INTEGRATION_RULES = 2
 
 
 def _extract_hub_rules(kb: RepoKB) -> list[str]:
@@ -57,7 +57,7 @@ def _extract_convention_rules(kb: RepoKB) -> list[str]:
                 rules.append(f"- {content} — check compliance before submitting.")
             else:
                 rules.append(f"- {content}")
-    return rules[:5]
+    return rules[:3]
 
 
 def _extract_test_rules(kb: RepoKB) -> list[str]:
@@ -74,7 +74,7 @@ def _extract_test_rules(kb: RepoKB) -> list[str]:
             rules.append(f"- {stripped.lstrip('- ')}")
         elif "fixture" in stripped.lower():
             rules.append(f"- {stripped.lstrip('- ')}")
-    return rules[:4]
+    return rules[:3]
 
 
 def _extract_integration_rules(kb: RepoKB) -> list[str]:
@@ -105,7 +105,7 @@ def _extract_import_chain_rules(kb: RepoKB) -> list[str]:
             break
         if in_chains and stripped.startswith("- "):
             rules.append(f"- Chain: {stripped[2:]}")
-    return rules[:4]
+    return rules[:3]
 
 
 def _base_workflow_rules() -> list[str]:
