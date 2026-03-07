@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -389,17 +390,33 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                         traj_dir=PREDS_DIR / config.experiment_id / condition / "trajectories",
                         api_base=config.api_base,
                     )
-                    patch_local = run_meta_local.get("patch", "")
+                    raw_patch_before_sanitize = run_meta_local.get("patch", "")
+                    patch_local = raw_patch_before_sanitize
                     patch_local, _patch_is_noop = sanitize_patch_for_preds(patch_local)
+                    _elog(
+                        f"Condition {condition}: iid={iid_local} pre-validation "
+                        f"raw_len={len(raw_patch_before_sanitize)} "
+                        f"sanitized_len={len(patch_local)} no_op={_patch_is_noop}"
+                    )
 
                     normalized_patch, patch_format_error = normalize_and_validate_patch(patch_local)
                     if patch_format_error:
+                        _elog(
+                            f"Condition {condition}: iid={iid_local} validation failed: "
+                            f"{patch_format_error!r} sanitized_len={len(patch_local)}"
+                        )
+                        run_meta_local["_debug_raw_patch"] = raw_patch_before_sanitize
+                        run_meta_local["_debug_sanitized_patch"] = patch_local
                         patch_local = ""
                         run_meta_local["status"] = "error"
                         run_meta_local["error"] = patch_format_error
                     else:
                         patch_local = normalized_patch
             except Exception as exc:
+                tb_str = traceback.format_exc()
+                _elog(
+                    f"Condition {condition}: iid={iid_local} EXCEPTION: {exc!r}\n{tb_str}"
+                )
                 patch_local = ""
                 run_meta_local = {
                     "elapsed_s": 0.0,
@@ -409,7 +426,8 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                         "total_tokens": 0,
                     },
                     "status": "error",
-                    "error": str(exc),
+                    "error": repr(exc),
+                    "traceback": tb_str,
                 }
 
             wall_s = time.perf_counter() - t_instance
@@ -436,95 +454,116 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                     completed_runs.append(future.result())
 
         for repo, iid, patch, run_meta, wall_s in completed_runs:
-            if run_meta.get("status") == "error" and run_meta.get("error"):
-                _elog(f"Condition {condition}: iid={iid} exception/error: {run_meta.get('error')}")
+            is_error = run_meta.get("status") == "error" and run_meta.get("error")
+
+            if is_error:
+                _elog(f"Condition {condition}: iid={iid} error: {run_meta.get('error')}")
+                # Write debug artifact for failed validation
+                debug_dir = exp_root / "debug" / condition
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                debug_artifact = {
+                    "instance_id": iid,
+                    "error": run_meta.get("error"),
+                    "traceback": run_meta.get("traceback"),
+                    "raw_patch_before_sanitize": run_meta.get("_debug_raw_patch", ""),
+                    "sanitized_patch": run_meta.get("_debug_sanitized_patch", ""),
+                    "raw_patch_len": len(run_meta.get("_debug_raw_patch", "") or ""),
+                    "sanitized_patch_len": len(run_meta.get("_debug_sanitized_patch", "") or ""),
+                }
+                debug_path = debug_dir / f"{iid}.json"
+                debug_path.write_text(
+                    json.dumps(debug_artifact, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                _elog(f"Condition {condition}: iid={iid} debug artifact written to {debug_path}")
             else:
                 _elog(
                     f"Condition {condition}: iid={iid} runner status={run_meta.get('status')} "
                     f"patch_source={run_meta.get('patch_source')} elapsed={run_meta.get('elapsed_s', 0.0):.2f}s"
                 )
-                _elog(f"Condition {condition}: iid={iid} raw patch length={len(run_meta.get('patch', '') or '')}")
-                _elog(
-                    f"Condition {condition}: iid={iid} sanitized patch length={len(patch)} "
-                    f"no_op={not bool(patch and patch.strip())}"
-                )
 
-                record = {
-                    "instance_id": iid,
-                    "model_name_or_path": config.model,
-                    "patch": patch,
-                    "model_patch": patch,
-                }
-                with cond_preds_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
-                _elog(f"Condition {condition}: iid={iid} appended preds record")
+            # Always write preds + metrics regardless of error status
+            record = {
+                "instance_id": iid,
+                "model_name_or_path": config.model,
+                "patch": patch,
+                "model_patch": patch,
+            }
+            with cond_preds_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+            _elog(f"Condition {condition}: iid={iid} appended preds record")
 
-                usage = run_meta.get("token_usage", {}) if isinstance(run_meta, dict) else {}
-                metrics_record = {
-                    "instance_id": iid,
-                    "repo": repo,
-                    "condition": condition,
-                    "wall_s": float(wall_s),
-                    "elapsed_s": float(run_meta.get("elapsed_s", 0.0) or 0.0),
-                    "patch_non_empty": bool(patch and patch.strip()),
-                    "patch_len_chars": int(len(patch or "")),
-                    "status": run_meta.get("status", "ok"),
-                    "error": run_meta.get("error"),
-                    "patch_source": run_meta.get("patch_source", "empty"),
-                    "steps_taken": int(run_meta.get("steps_taken", 0) or 0),
-                    "used_max_steps": bool(int(run_meta.get("steps_taken", 0) or 0) >= int(config.step_limit)),
-                    "diff_block_found": bool(run_meta.get("diff_block_found", False)),
-                    "git_diff_non_empty": bool(run_meta.get("git_diff_non_empty", False)),
-                    "fallback_single_shot_used": bool(run_meta.get("fallback_single_shot_used", False)),
-                    "fallback_single_shot_patch_len": int(run_meta.get("fallback_single_shot_patch_len", 0) or 0),
-                    "fallback_single_shot_raw_len": int(run_meta.get("fallback_single_shot_raw_len", 0) or 0),
-                    "fallback_reason": run_meta.get("fallback_reason"),
-                    "fallback_single_shot_truncated": bool(run_meta.get("fallback_single_shot_truncated", False)),
-                    "stall_detected": bool(run_meta.get("stall_detected", False)),
-                    "stall_type": run_meta.get("stall_type"),
-                    "stall_action": run_meta.get("stall_action"),
-                    "stall_repeat_count": int(run_meta.get("stall_repeat_count", 0) or 0),
-                    "repeated_command_stall_count": int(run_meta.get("repeated_command_stall_count", 0) or 0),
-                    "debug_enabled": bool(run_meta.get("debug_enabled", False)),
-                    "debug_dir": run_meta.get("debug_dir"),
-                    "assistant_step_artifacts": int(run_meta.get("assistant_step_artifacts", 0) or 0),
-                    "bash_step_artifacts": int(run_meta.get("bash_step_artifacts", 0) or 0),
-                    "no_bash_block_count": int(run_meta.get("no_bash_block_count", 0) or 0),
-                    "empty_bash_block_count": int(run_meta.get("empty_bash_block_count", 0) or 0),
-                    "non_actionable_reason_counts": run_meta.get(
-                        "non_actionable_reason_counts",
-                        {"no_bash_block": 0, "empty_bash_block": 0},
-                    ),
-                    "token_usage_source": str(run_meta.get("token_usage_source", "estimated") or "estimated"),
-                    "reported_tokens": run_meta.get(
-                        "reported_tokens",
-                        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                    ),
-                    "estimated_tokens": run_meta.get(
-                        "estimated_tokens",
-                        {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                    ),
-                    "token_usage": {
-                        "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
-                        "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
-                        "total_tokens": int(usage.get("total_tokens", 0) or 0),
-                    },
-                }
-                with cond_metrics_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(metrics_record, sort_keys=True, ensure_ascii=False) + "\n")
-                _elog(
-                    f"Condition {condition}: iid={iid} appended metrics "
-                    f"status={metrics_record['status']} patch_non_empty={metrics_record['patch_non_empty']}"
-                )
+            usage = run_meta.get("token_usage", {}) if isinstance(run_meta, dict) else {}
+            metrics_record = {
+                "instance_id": iid,
+                "repo": repo,
+                "condition": condition,
+                "wall_s": float(wall_s),
+                "elapsed_s": float(run_meta.get("elapsed_s", 0.0) or 0.0),
+                "patch_non_empty": bool(patch and patch.strip()),
+                "patch_len_chars": int(len(patch or "")),
+                "status": run_meta.get("status", "ok"),
+                "error": run_meta.get("error"),
+                "patch_source": run_meta.get("patch_source", "empty"),
+                "steps_taken": int(run_meta.get("steps_taken", 0) or 0),
+                "used_max_steps": bool(int(run_meta.get("steps_taken", 0) or 0) >= int(config.step_limit)),
+                "diff_block_found": bool(run_meta.get("diff_block_found", False)),
+                "git_diff_non_empty": bool(run_meta.get("git_diff_non_empty", False)),
+                "fallback_single_shot_used": bool(run_meta.get("fallback_single_shot_used", False)),
+                "fallback_single_shot_patch_len": int(run_meta.get("fallback_single_shot_patch_len", 0) or 0),
+                "fallback_single_shot_raw_len": int(run_meta.get("fallback_single_shot_raw_len", 0) or 0),
+                "fallback_reason": run_meta.get("fallback_reason"),
+                "fallback_single_shot_truncated": bool(run_meta.get("fallback_single_shot_truncated", False)),
+                "stall_detected": bool(run_meta.get("stall_detected", False)),
+                "stall_type": run_meta.get("stall_type"),
+                "stall_action": run_meta.get("stall_action"),
+                "stall_repeat_count": int(run_meta.get("stall_repeat_count", 0) or 0),
+                "repeated_command_stall_count": int(run_meta.get("repeated_command_stall_count", 0) or 0),
+                "debug_enabled": bool(run_meta.get("debug_enabled", False)),
+                "debug_dir": run_meta.get("debug_dir"),
+                "assistant_step_artifacts": int(run_meta.get("assistant_step_artifacts", 0) or 0),
+                "bash_step_artifacts": int(run_meta.get("bash_step_artifacts", 0) or 0),
+                "no_bash_block_count": int(run_meta.get("no_bash_block_count", 0) or 0),
+                "empty_bash_block_count": int(run_meta.get("empty_bash_block_count", 0) or 0),
+                "non_actionable_reason_counts": run_meta.get(
+                    "non_actionable_reason_counts",
+                    {"no_bash_block": 0, "empty_bash_block": 0},
+                ),
+                "token_usage_source": str(run_meta.get("token_usage_source", "estimated") or "estimated"),
+                "reported_tokens": run_meta.get(
+                    "reported_tokens",
+                    {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                ),
+                "estimated_tokens": run_meta.get(
+                    "estimated_tokens",
+                    {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                ),
+                "token_usage": {
+                    "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                    "total_tokens": int(usage.get("total_tokens", 0) or 0),
+                },
+            }
+            with cond_metrics_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(metrics_record, sort_keys=True, ensure_ascii=False) + "\n")
+            _elog(
+                f"Condition {condition}: iid={iid} appended metrics "
+                f"status={metrics_record['status']} patch_non_empty={metrics_record['patch_non_empty']}"
+            )
 
-                done_count += 1
-                completed_ids.add(iid)
-                status = "OK" if patch else "EMPTY"
-                print(f"  [{condition}] [{done_count}/{total_instances}] {iid} -> {status}")
-                _elog(
-                    f"Condition {condition}: completed iid={iid} overall_status={status} "
-                    f"wall={wall_s:.2f}s"
-                )
+            done_count += 1
+            completed_ids.add(iid)
+            if is_error:
+                display_status = "ERROR"
+            elif patch:
+                display_status = "OK"
+            else:
+                display_status = "EMPTY"
+            print(f"  [{condition}] [{done_count}/{total_instances}] {iid} -> {display_status}")
+            _elog(
+                f"Condition {condition}: completed iid={iid} overall_status={display_status} "
+                f"wall={wall_s:.2f}s"
+            )
 
         for key in repo_keys_to_mark:
             if key not in state.eval_completed:
