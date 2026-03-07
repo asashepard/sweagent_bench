@@ -1,12 +1,5 @@
-django/django HEAD
-astropy/astropy HEAD
-sympy/sympy HEAD
-scikit-learn/scikit-learn HEAD
-matplotlib/matplotlib HEAD
-pallets/flask HEAD
-sphinx-doc/sphinx HEAD
-pylint-dev/pylint HEAD
-pytest-dev/pytest HEAD
-psf/requests HEAD
-pydata/xarray HEAD
-mwaskom/seaborn HEAD
+# DEPRECATED: commit pinning is now done via the "commit" field in repos_12.json.
+# Each repo entry must have an explicit full-length SHA. HEAD is no longer accepted.
+# To get current HEAD SHAs, run:
+#   git ls-remote https://github.com/<owner>/<repo>.git HEAD
+# Then paste the SHA into repos_12.json.

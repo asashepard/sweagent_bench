@@ -24,6 +24,7 @@ from sweagent_bench.oracle.schema import Edit
 # these after alias remapping, or they are dropped.
 _CANONICAL_SECTIONS = {
     "operating mode",
+    "procedural standards",
     "repo priors",
     "high-impact hubs",
     "entry points",
@@ -50,6 +51,11 @@ _SECTION_ALIASES: dict[str, str] = {
     "regression fix workflow": "operating mode",
     "regression handling": "operating mode",
     "patch requirements": "operating mode",
+    # → procedural standards
+    "procedural": "procedural standards",
+    "procedure": "procedural standards",
+    "standards": "procedural standards",
+    "process rules": "procedural standards",
     # → guardrails
     "guardrail": "guardrails",
     "guard rails": "guardrails",
@@ -267,6 +273,12 @@ def _section_priority(sec: dict) -> int:
 
 def _trim_to_budget(sections: list[dict], budget: int) -> tuple[str, int]:
     """Pop the longest bullet from any section until under budget.
+
+    This is intentional behavior: the longest bullet globally (across all
+    sections) is removed first, regardless of section priority.  This keeps
+    the algorithm simple and deterministic while avoiding priority-based
+    trimming that could inadvertently preserve low-value verbose content
+    in high-priority sections.
 
     Returns (rendered_str, bullets_removed).
     """

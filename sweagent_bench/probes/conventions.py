@@ -128,7 +128,7 @@ def _detect_import_style(trees: dict[str, Any], source_map: dict[str, bytes]) ->
 def _detect_linter_configs(repo_dir: Path) -> list[str]:
     found: list[str] = []
     try:
-        for item in repo_dir.iterdir():
+        for item in sorted(repo_dir.iterdir()):
             if item.is_file() and item.name in _LINTER_CONFIG_FILES:
                 found.append(item.name)
     except PermissionError:

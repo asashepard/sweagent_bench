@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import difflib
 import json
 import re
 import time
@@ -95,6 +96,9 @@ def _write_iteration_artifacts(
     guidance_before: str,
     guidance_after: str,
     summary: dict,
+    *,
+    probe_results: list[ProbeResult] | None = None,
+    diagnose_edits: list[Edit] | None = None,
 ) -> None:
     (out_dir / f"iteration_{iteration}_probes.json").write_text(
         json.dumps(probes_payload, indent=2, ensure_ascii=False) + "\n",
@@ -116,6 +120,28 @@ def _write_iteration_artifacts(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    # Extended provenance artifacts
+    if probe_results is not None:
+        (out_dir / f"iteration_{iteration}_probe_results.json").write_text(
+            json.dumps([asdict(pr) for pr in probe_results], indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    if diagnose_edits is not None:
+        (out_dir / f"iteration_{iteration}_diagnose_edits.json").write_text(
+            json.dumps([asdict(e) for e in diagnose_edits], indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    # Unified diff between guidance versions
+    diff_lines = list(difflib.unified_diff(
+        guidance_before.splitlines(keepends=True),
+        guidance_after.splitlines(keepends=True),
+        fromfile=f"agents_md_v{iteration - 1}",
+        tofile=f"agents_md_v{iteration}",
+    ))
+    (out_dir / f"iteration_{iteration}_guidance_diff.txt").write_text(
+        "".join(diff_lines) if diff_lines else "(no changes)\n",
+        encoding="utf-8",
+    )
 
 
 def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
@@ -132,7 +158,22 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
     guidance_dir = out / "versions"
     guidance_dir.mkdir(parents=True, exist_ok=True)
 
+    # Guard: reject HEAD or non-SHA commit refs
+    _commit = config.commit.strip()
+    if (
+        not _commit
+        or _commit.upper() == "HEAD"
+        or len(_commit) < 7
+        or not all(c in "0123456789abcdefABCDEF" for c in _commit)
+    ):
+        raise ValueError(
+            f"Oracle loop requires a pinned commit SHA (>= 7 hex chars), "
+            f"got '{config.commit}' for repo '{config.repo}'. "
+            "Do not use HEAD — pin an explicit SHA in your repos config."
+        )
+
     _olog(f"Starting oracle loop for repo={config.repo} commit={config.commit}")
+    _olog(f"Pinned commit: {config.commit}")
     _olog(f"Model: {config.model} | Iterations: {config.iterations} | Timeout: {config.timeout_s}s")
 
     t_checkout = time.perf_counter()
@@ -157,6 +198,33 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
     )
     v0_guidance.save(guidance_dir / "v0.json")
     (kb_dir / "agents_md_v0.md").write_text(agents_md, encoding="utf-8")
+
+    # Write provenance metadata — captures the full experiment context
+    provenance_start = datetime.now(timezone.utc).isoformat()
+    provenance = {
+        "repo": config.repo,
+        "pinned_commit": config.commit,
+        "model": config.model,
+        "oracle_iterations_planned": config.iterations,
+        "temperatures": {
+            "probe_generation": 0.0,
+            "probe_execution": 0.0,
+            "judge": 0.0,
+            "diagnose": 0.0,
+        },
+        "timestamp_start": provenance_start,
+        "provenance_statement": (
+            "Oracle loop inputs are limited to: repo structural analysis "
+            "(tree-sitter) + current AGENTS.md + LLM-generated synthetic probes. "
+            "No benchmark instance text, hidden tests, or evaluation data are used."
+        ),
+    }
+    provenance_path = out / "provenance_metadata.json"
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _olog(f"Provenance metadata written to {provenance_path}")
 
     if config.iterations <= 0:
         final_path = out / "best_guidance.json"
@@ -385,6 +453,8 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
             guidance_before=guidance_before,
             guidance_after=agents_md,
             summary=summary,
+            probe_results=results,
+            diagnose_edits=llm_edits,
         )
 
         new_version = current.version + 1
@@ -430,6 +500,25 @@ def run_oracle_loop(config: OracleConfig) -> tuple[RepoKB, RepoGuidance]:
 
     config_path = out / "oracle_config.json"
     config_path.write_text(json.dumps(config.to_dict(), indent=2) + "\n", encoding="utf-8")
+
+    # Update provenance metadata with completion info
+    early_stop_reason = None
+    if no_change_streak >= 2:
+        early_stop_reason = "2 consecutive no-change iterations with evaluated probes"
+    try:
+        provenance_data = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except Exception:
+        provenance_data = provenance  # fallback to in-memory copy
+    provenance_data["timestamp_end"] = datetime.now(timezone.utc).isoformat()
+    provenance_data["total_iterations_run"] = state.completed_iterations
+    provenance_data["final_version"] = current.version
+    if early_stop_reason:
+        provenance_data["early_stop_reason"] = early_stop_reason
+    provenance_path.write_text(
+        json.dumps(provenance_data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _olog(f"Provenance metadata updated with completion info")
 
     return kb, current
 

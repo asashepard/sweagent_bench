@@ -82,6 +82,23 @@ class ExperimentConfig:
                 raise ValueError(
                     f"Unknown condition '{c}'. Valid: {VALID_CONDITIONS}"
                 )
+        # Validate pinned commits — HEAD and symbolic refs are rejected.
+        for entry in self.repos:
+            repo = entry.get("repo", "")
+            commit = entry.get("commit", "")
+            if not commit or commit.upper() == "HEAD":
+                raise ValueError(
+                    f"Repo '{repo}' has commit='{commit}'. "
+                    "A pinned SHA (>= 7 hex chars) is required. "
+                    "HEAD is not accepted — pin an explicit commit SHA in repos config."
+                )
+            if len(commit) < 7 or not all(
+                c in "0123456789abcdefABCDEF" for c in commit
+            ):
+                raise ValueError(
+                    f"Repo '{repo}' has commit='{commit}' which is not a valid "
+                    "hex SHA (>= 7 chars). Pin an explicit commit SHA."
+                )
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -218,6 +235,7 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         print(f"[experiment] Processing {repo}")
         print(f"{'='*60}")
         _elog(f"Processing repo {repo} started")
+        _elog(f"Pinned commit for KB/oracle: repo={repo} commit={commit}")
 
         oracle_iters = config.oracle_iterations if needs_oracle else 0
         out_dir = str(exp_root / "guidance" / repo.replace("/", "__"))
@@ -310,14 +328,49 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
         _elog(f"Condition {condition}: preds_path={cond_preds_path}")
         _elog(f"Condition {condition}: metrics_path={cond_metrics_path}")
 
-        # Resume support
+        # Resume support — deduplicate preds if prior run left duplicates
         completed_ids: set[str] = set()
         completed_metrics: dict[str, dict] = {}
         if cond_preds_path.exists():
-            completed_ids = {r["instance_id"] for r in read_jsonl(cond_preds_path)}
+            all_preds = list(read_jsonl(cond_preds_path))
+            # Deduplicate: keep last occurrence per instance_id
+            seen_ids: dict[str, dict] = {}
+            for rec in all_preds:
+                seen_ids[rec["instance_id"]] = rec
+            if len(seen_ids) < len(all_preds):
+                dup_count = len(all_preds) - len(seen_ids)
+                _elog(
+                    f"WARNING: Deduplicated {dup_count} duplicate entries in "
+                    f"{cond_preds_path}. Rewriting file."
+                )
+                print(
+                    f"  WARNING: Deduplicated {dup_count} duplicate preds in "
+                    f"{cond_preds_path}",
+                    flush=True,
+                )
+                with cond_preds_path.open("w", encoding="utf-8") as f:
+                    for rec in seen_ids.values():
+                        f.write(
+                            json.dumps(rec, sort_keys=True, ensure_ascii=False)
+                            + "\n"
+                        )
+            completed_ids = set(seen_ids.keys())
         if cond_metrics_path.exists():
             for rec in read_jsonl(cond_metrics_path):
                 completed_metrics[rec["instance_id"]] = rec
+        # Consistency check between preds and metrics
+        if completed_ids and completed_metrics:
+            if len(completed_ids) != len(completed_metrics):
+                _elog(
+                    f"WARNING: preds count ({len(completed_ids)}) != "
+                    f"metrics count ({len(completed_metrics)}) for {condition}. "
+                    "Possible partial write from prior run."
+                )
+                print(
+                    f"  WARNING: preds/metrics count mismatch for {condition}: "
+                    f"preds={len(completed_ids)} metrics={len(completed_metrics)}",
+                    flush=True,
+                )
         _elog(
             f"Condition {condition}: resume loaded "
             f"completed_ids={len(completed_ids)} completed_metrics={len(completed_metrics)}"
@@ -344,6 +397,10 @@ def run_experiment(config: ExperimentConfig, *, dry_run: bool = False) -> Path:
                 repo_guidance = guidance_map.get(repo, {}).get(condition)
                 if repo_guidance is not None:
                     guidance_text = repo_guidance.render()
+                    _elog(
+                        f"Agent generation: repo={repo} condition={condition} "
+                        f"pinned_commit={repo_guidance.commit} guidance_version={repo_guidance.version}"
+                    )
                     if len(guidance_text) > AGENTS_MD_CHAR_BUDGET:
                         guidance_text = guidance_text[:AGENTS_MD_CHAR_BUDGET - 20] + "\n[... truncated]"
                     guidance_char_counts[repo] = len(guidance_text)

@@ -125,6 +125,25 @@ def _guardrail_rules() -> list[str]:
     ]
 
 
+def _procedural_scaffold_rules() -> list[str]:
+    """Generic, repo-agnostic procedural standards.
+
+    These rules form a stronger fixed baseline for the static_kb control.
+    They are NOT issue-specific, benchmark-specific, or oracle-derived.
+    The oracle_tuned condition is free to exceed or refine these.
+    """
+    return [
+        "- Reproduce targeted failures before editing when possible.",
+        "- Prefer the smallest discriminating test first.",
+        "- Read target files and nearby callers/callees before patching.",
+        "- Keep first patch minimal and localized to the diagnosed module.",
+        "- Rerun the same targeted test after editing to confirm the fix.",
+        "- Inspect nearby call sites if signatures or public behavior change.",
+        "- Avoid fabricated edits — require evidence from file reads or command output.",
+        "- Ensure patches are syntactically complete and remove unused imports.",
+    ]
+
+
 def render_agents_md(kb: RepoKB) -> str:
     """Render a compact, exploration-first AGENTS.md from RepoKB. Deterministic."""
     lines: list[str] = []
@@ -132,6 +151,9 @@ def render_agents_md(kb: RepoKB) -> str:
     lines.append(f"# AGENTS.md — {kb.repo}")
     lines.append("## Operating Mode")
     lines.extend(_base_workflow_rules())
+
+    lines.append("## Procedural Standards")
+    lines.extend(_procedural_scaffold_rules())
 
     hub_rules = _extract_hub_rules(kb)
     ep_rules = _extract_entry_point_rules(kb)

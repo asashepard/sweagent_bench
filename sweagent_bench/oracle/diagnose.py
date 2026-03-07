@@ -72,7 +72,7 @@ def diagnose_failures(
             agents_md=agents_md, diagnostics=diagnostics_text,
         )},
     ]
-    raw = chat_completion(model=model, messages=messages, temperature=0.3, max_tokens=2048, timeout_s=timeout_s)
+    raw = chat_completion(model=model, messages=messages, temperature=0.0, max_tokens=2048, timeout_s=timeout_s)
     return _parse_edits(raw)
 
 

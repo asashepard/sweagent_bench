@@ -41,8 +41,8 @@ def parse_repo(repo_dir: Path) -> dict[str, Any]:
     """Parse all ``.py`` files in *repo_dir*, respecting ignore patterns."""
     trees: dict[str, Any] = {}
     for root, dirs, files in os.walk(repo_dir):
-        dirs[:] = [d for d in dirs if not should_ignore_dir(d)]
-        for fname in files:
+        dirs[:] = sorted(d for d in dirs if not should_ignore_dir(d))
+        for fname in sorted(files):
             if not fname.endswith(".py") or should_ignore_file(fname):
                 continue
             full = Path(root) / fname

@@ -369,12 +369,8 @@ def _run_agent_loop(
         info["steps_taken"] = step + 1
         _rlog(f"Step {step+1}/{max_steps} start iid={instance.get('instance_id')}")
 
-        # ── LLM call (env save/restore for api_base) ──
-        prev_base = os.environ.get("OPENAI_BASE_URL")
+        # ── LLM call ──
         try:
-            if api_base:
-                os.environ["OPENAI_BASE_URL"] = api_base
-
             remaining = max(30, int(deadline - time.perf_counter()))
             t_llm = time.perf_counter()
             messages = _trim_messages(messages, max_turns=AGENT_MAX_TURNS)
@@ -388,6 +384,7 @@ def _run_agent_loop(
                 temperature=0.0,
                 max_tokens=AGENT_MAX_TOKENS,
                 timeout_s=min(remaining, 300),
+                api_base=api_base,
             )
             response_text = llm_data.get("content", "") if isinstance(llm_data, dict) else ""
             usage = llm_data.get("usage", {}) if isinstance(llm_data, dict) else {}
@@ -406,12 +403,6 @@ def _run_agent_loop(
             info["error"] = f"LLM call failed at step {step}: {e}"
             _rlog(f"Step {step+1}: LLM call error: {e}")
             break
-        finally:
-            if api_base:
-                if prev_base is not None:
-                    os.environ["OPENAI_BASE_URL"] = prev_base
-                else:
-                    os.environ.pop("OPENAI_BASE_URL", None)
 
         # ── Debug: write raw assistant response ──
         if _debug_write(debug_dir, f"assistant_step_{step}.txt", response_text):
@@ -844,14 +835,9 @@ def _fallback_single_shot(
         guidance_text=guidance_text,
     )
 
-    # Temporarily override API base if provided, then restore.
-    # This avoids permanently mutating the process environment.
-    prev_base = os.environ.get("OPENAI_BASE_URL")
+    # Pass api_base directly to the LLM client (thread-safe).
     token_tracker = TokenUsageTracker()
     try:
-        if api_base:
-            os.environ["OPENAI_BASE_URL"] = api_base
-
         prompt_text = "\n\n".join(
             f"{m.get('role', '')}: {m.get('content', '')}"
             for m in messages
@@ -862,16 +848,13 @@ def _fallback_single_shot(
             temperature=0.0,
             max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
             timeout_s=timeout_s,
+            api_base=api_base,
         )
         raw = llm_data.get("content", "") if isinstance(llm_data, dict) else ""
         usage = llm_data.get("usage", {}) if isinstance(llm_data, dict) else {}
         token_tracker.add_step(prompt_text, raw, usage)
-    finally:
-        if api_base:
-            if prev_base is not None:
-                os.environ["OPENAI_BASE_URL"] = prev_base
-            else:
-                os.environ.pop("OPENAI_BASE_URL", None)
+    except Exception:
+        raise
 
     from sweagent_bench.generation.patch_utils import extract_diff
     return extract_diff(raw), token_tracker.export()

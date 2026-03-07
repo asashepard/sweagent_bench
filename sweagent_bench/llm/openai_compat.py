@@ -36,6 +36,7 @@ def chat_completion(
     top_p: float = 1.0,
     max_tokens: int = 512,
     timeout_s: int = 120,
+    api_base: str | None = None,
 ) -> str:
     """Call OpenAI-compatible chat completion endpoint.
 
@@ -46,6 +47,9 @@ def chat_completion(
         top_p: Top-p sampling parameter (default 1.0).
         max_tokens: Maximum tokens to generate (default 512).
         timeout_s: Request timeout in seconds.
+        api_base: Optional API base URL override. If provided, used instead
+            of the OPENAI_BASE_URL environment variable. This avoids
+            thread-unsafe os.environ mutation.
 
     Returns:
         The assistant's response content string.
@@ -62,6 +66,7 @@ def chat_completion(
         top_p=top_p,
         max_tokens=max_tokens,
         timeout_s=timeout_s,
+        api_base=api_base,
     )
     return data["content"]
 
@@ -74,14 +79,26 @@ def chat_completion_with_metadata(
     top_p: float = 1.0,
     max_tokens: int = 512,
     timeout_s: int = 120,
+    api_base: str | None = None,
 ) -> dict:
     """Call chat completion endpoint and return content plus optional usage.
+
+    Args:
+        model: Model name/path.
+        messages: List of message dicts.
+        temperature: Sampling temperature.
+        top_p: Top-p sampling parameter.
+        max_tokens: Maximum tokens to generate.
+        timeout_s: Request timeout in seconds.
+        api_base: Optional API base URL override. Takes precedence over
+            the OPENAI_BASE_URL environment variable and avoids
+            thread-unsafe os.environ mutation.
 
     Returns a dict with keys:
     - content: assistant text
     - usage: token usage dict (may be empty)
     """
-    base_url = get_base_url().rstrip("/")
+    base_url = (api_base or get_base_url()).rstrip("/")
     url = f"{base_url}/chat/completions"
 
     headers = {
