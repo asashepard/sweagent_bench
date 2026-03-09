@@ -2,7 +2,7 @@
 
 Usage:
     python -m sweagent_bench.main \
-        --model Qwen/Qwen3.5-35B \
+        --model Qwen/Qwen3.5-35B-A3B \
         --experiment-id exp_qwen35_v1 \
         --conditions no_context static_kb oracle_tuned \
         --instance-ids-file ids/verified_mini_ids.txt \
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model", required=True,
-        help="Model name/path (e.g. Qwen/Qwen3.5-35B)",
+        help="Model name/path (e.g. Qwen/Qwen3.5-35B-A3B)",
     )
     parser.add_argument(
         "--experiment-id", required=True,

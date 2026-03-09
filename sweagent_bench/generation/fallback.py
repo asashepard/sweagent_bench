@@ -4,7 +4,7 @@ Used when SWE-agent produces an empty patch. Calls the LLM directly
 with the issue + optional guidance text and extracts a diff.
 
 Adapted from context_policy/runner/single_shot.py — import paths
-updated, max_tokens default lowered to 512 for Qwen 3.5 35B.
+updated, max_tokens default lowered to 512 for Qwen 3.5 35B-A3B.
 """
 from __future__ import annotations
 

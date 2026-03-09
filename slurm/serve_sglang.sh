@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Serve Qwen 3.5 35B via SGLang on gpmoo-a1.
+# Serve Qwen 3.5 35B-A3B via SGLang on gpmoo-a1.
 #
 # SLURM job — submit with: sbatch slurm/serve_sglang.sh
 #
@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-MODEL="${MODEL:-Qwen/Qwen3.5-35B}"
+MODEL="${MODEL:-Qwen/Qwen3.5-35B-A3B}"
 PORT="${PORT:-8001}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 GPU_UTIL="${GPU_UTIL:-0.90}"

@@ -5,7 +5,7 @@ Supports three experimental conditions:
 2. ``static_kb``: agent sees tree-sitter KB rendered as AGENTS.md (no LLM tuning).
 3. ``oracle_tuned``: agent sees AGENTS.md refined by the LLM-as-judge oracle loop.
 
-Adapted from context_policy/loop/orchestrator.py for SWE-agent + Qwen 3.5 35B:
+Adapted from context_policy/loop/orchestrator.py for SWE-agent + Qwen 3.5 35B-A3B:
 - Replaces generate_patch_with_mini_swebench_result with
   generate_patch_with_sweagent from generation.sweagent_runner.
 - Default timeout_s raised to 1800 (30 min).
@@ -63,12 +63,12 @@ class ExperimentConfig:
     oracle_iterations: int = 5
     oracle_probe_timeout_s: int = 600
 
-    # Runner settings — adapted for SWE-agent + Qwen 3.5 35B
+    # Runner settings — adapted for SWE-agent + Qwen 3.5 35B-A3B
     timeout_s: int = 1800       # 30 minutes (was 600)
     step_limit: int = 50        # SWE-agent max steps (was 30)
     max_workers_gen: int = 1    # generation workers per condition (default keeps prior behavior)
     api_base: str | None = None         # vLLM API base URL
-    context_window: int = 16384         # Qwen 3.5 35B context window
+    context_window: int = 16384         # Qwen 3.5 35B-A3B context window
 
     # Eval settings
     eval_dataset: str = "princeton-nlp/SWE-bench_Verified"

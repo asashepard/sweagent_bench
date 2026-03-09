@@ -13,7 +13,7 @@
 #
 # Reference for SWE-agent >= 0.7 config keys:
 #   model:
-#     name: Qwen/Qwen3.5-35B
+#     name: Qwen/Qwen3.5-35B-A3B
 #     per_instance_cost_limit: 0
 #   actions:
 #     apply_patch_locally: true

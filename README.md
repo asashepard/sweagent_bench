@@ -1,6 +1,6 @@
 # sweagent-bench
 
-SWE-agent + Qwen 3.5 35B + vLLM + SWE-bench harness experiment pipeline.
+SWE-agent + Qwen 3.5 35B-A3B + vLLM + SWE-bench harness experiment pipeline.
 
 Three experimental conditions:
 - **no_context**: agent sees only the issue + file tree
@@ -27,7 +27,7 @@ IDS_FILE=ids/verified_smoke_4_ids.txt \
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3.5-35B \
+  --model Qwen/Qwen3.5-35B-A3B \
   --max-model-len 16384 \
   --gpu-memory-utilization 0.90 \
   --host 0.0.0.0 --port 8001
@@ -37,7 +37,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 ```bash
 python -m sglang.launch_server \
-  --model-path Qwen/Qwen3.5-35B \
+  --model-path Qwen/Qwen3.5-35B-A3B \
   --context-length 16384 \
   --mem-fraction-static 0.90 \
   --host 0.0.0.0 --port 8001
@@ -58,7 +58,7 @@ sbatch slurm/serve_sglang.sh
 sbatch slurm/run_experiment.sh
 
 # Submit experiment with overrides
-MODEL=Qwen/Qwen3.5-35B \
+MODEL=Qwen/Qwen3.5-35B-A3B \
 OPENAI_BASE_URL=http://gpmoo-a1:8001/v1 \
 EXPERIMENT_ID=exp_oracle_runner_$(date +%Y%m%d_%H%M%S) \
 CONDITIONS="no_context static_kb oracle_tuned" \

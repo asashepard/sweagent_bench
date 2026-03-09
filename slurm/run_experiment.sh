@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
-export MODEL="${MODEL:-Qwen/Qwen3.5-35B}"
+export MODEL="${MODEL:-Qwen/Qwen3.5-35B-A3B}"
 export EXPERIMENT_ID="${EXPERIMENT_ID:-exp_slurm_$(date +%Y%m%d_%H%M%S)}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://gpmoo-a1:8001/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"

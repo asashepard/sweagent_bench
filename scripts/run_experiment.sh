@@ -17,7 +17,7 @@
 #   OPENAI_BASE_URL  — vLLM/SGLang endpoint (e.g. http://gpmoo-a1:8001/v1)
 #
 # Optional env vars:
-#   MODEL            — model name (default: Qwen/Qwen3.5-35B)
+#   MODEL            — model name (default: Qwen/Qwen3.5-35B-A3B)
 #   EXPERIMENT_ID    — experiment identifier (default: auto-generated)
 
 set -euo pipefail
@@ -27,7 +27,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # ── Defaults ──────────────────────────────────────────────────
-MODEL="${MODEL:-Qwen/Qwen3.5-35B}"
+MODEL="${MODEL:-Qwen/Qwen3.5-35B-A3B}"
 EXPERIMENT_ID="${EXPERIMENT_ID:-exp_$(date +%Y%m%d_%H%M%S)}"
 CONDITIONS="${CONDITIONS:-no_context static_kb oracle_tuned}"
 IDS_FILE="${IDS_FILE:-ids/verified_mini_ids.txt}"
