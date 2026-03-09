@@ -9,7 +9,7 @@ Usage:
         --repos-config configs/repos_12.json
 
 Environment variables:
-    OPENAI_BASE_URL  — vLLM endpoint (default: http://localhost:8000/v1)
+    OPENAI_BASE_URL  — vLLM/SGLang endpoint (default: http://localhost:8001/v1)
     OPENAI_API_KEY   — set to 'EMPTY' for vLLM (default: EMPTY)
 """
 from __future__ import annotations
@@ -87,11 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--api-base",
-        help="vLLM API base URL (default: $OPENAI_BASE_URL or http://localhost:8000/v1)",
+        help="vLLM/SGLang API base URL (default: $OPENAI_BASE_URL or http://localhost:8001/v1)",
     )
     parser.add_argument(
-        "--context-window", type=int, default=32768,
-        help="Model context window size (default: 32768)",
+        "--context-window", type=int, default=16384,
+        help="Model context window size (default: 16384)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve API base
     api_base = args.api_base or os.environ.get(
-        "OPENAI_BASE_URL", "http://localhost:8000/v1"
+        "OPENAI_BASE_URL", "http://localhost:8001/v1"
     )
 
     # Ensure OPENAI_API_KEY is set (vLLM doesn't need a real key)

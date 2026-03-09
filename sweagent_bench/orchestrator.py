@@ -68,7 +68,7 @@ class ExperimentConfig:
     step_limit: int = 50        # SWE-agent max steps (was 30)
     max_workers_gen: int = 1    # generation workers per condition (default keeps prior behavior)
     api_base: str | None = None         # vLLM API base URL
-    context_window: int = 32768         # Qwen 3.5 35B context window
+    context_window: int = 16384         # Qwen 3.5 35B context window
 
     # Eval settings
     eval_dataset: str = "princeton-nlp/SWE-bench_Verified"

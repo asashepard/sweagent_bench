@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Serve Qwen 3.5 35B via vLLM on gpmoo-a1.
+# Serve Qwen 3.5 35B via SGLang on gpmoo-a1.
 #
-# SLURM job — submit with: sbatch slurm/serve_vllm.sh
+# SLURM job — submit with: sbatch slurm/serve_sglang.sh
 #
-#SBATCH --job-name=vllm-qwen35
+#SBATCH --job-name=sglang-qwen35
 #SBATCH --partition=gpmoo-a
 #SBATCH --nodelist=gpmoo-a1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=96G
 #SBATCH --time=48:00:00
-#SBATCH --output=logs/vllm_%j.out
-#SBATCH --error=logs/vllm_%j.err
+#SBATCH --output=logs/sglang_%j.out
+#SBATCH --error=logs/sglang_%j.err
 
 set -euo pipefail
 
@@ -21,18 +21,18 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 GPU_UTIL="${GPU_UTIL:-0.90}"
 TP="${TP:-1}"
 
-echo "Starting vLLM server..."
+echo "Starting SGLang server..."
 echo "  Model: $MODEL"
 echo "  Port: $PORT"
 echo "  Max model len: $MAX_MODEL_LEN"
 echo "  GPU util: $GPU_UTIL"
 echo "  Tensor parallel: $TP"
 
-python -m vllm.entrypoints.openai.api_server \
-    --model "$MODEL" \
+python -m sglang.launch_server \
+    --model-path "$MODEL" \
     --port "$PORT" \
-    --max-model-len "$MAX_MODEL_LEN" \
-    --gpu-memory-utilization "$GPU_UTIL" \
-    --tensor-parallel-size "$TP" \
+    --context-length "$MAX_MODEL_LEN" \
+    --mem-fraction-static "$GPU_UTIL" \
+    --tp-size "$TP" \
     --trust-remote-code \
     --disable-log-requests

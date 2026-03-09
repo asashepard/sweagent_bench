@@ -6,7 +6,7 @@ import os
 import requests
 
 
-DEFAULT_API_BASE = "http://localhost:8000/v1"
+DEFAULT_API_BASE = "http://localhost:8001/v1"
 
 
 def check_vllm(api_base: str | None = None) -> bool:
@@ -14,7 +14,7 @@ def check_vllm(api_base: str | None = None) -> bool:
 
     Args:
         api_base: OpenAI-compatible base URL. Falls back to
-            OPENAI_BASE_URL env var, then localhost:8000/v1.
+            OPENAI_BASE_URL env var, then localhost:8001/v1.
 
     Returns:
         True if the server lists at least one model.

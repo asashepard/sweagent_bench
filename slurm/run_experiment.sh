@@ -17,7 +17,7 @@ set -euo pipefail
 # ── Configuration ─────────────────────────────────────────────
 export MODEL="${MODEL:-Qwen/Qwen3.5-35B}"
 export EXPERIMENT_ID="${EXPERIMENT_ID:-exp_slurm_$(date +%Y%m%d_%H%M%S)}"
-export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://gpmoo-a1:8000/v1}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://gpmoo-a1:8001/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 export CONDITIONS="${CONDITIONS:-no_context static_kb oracle_tuned}"
 export IDS_FILE="${IDS_FILE:-ids/verified_mini_ids.txt}"
@@ -26,7 +26,7 @@ export STEP_LIMIT="${STEP_LIMIT:-50}"
 export MAX_WORKERS_GEN="${MAX_WORKERS_GEN:-1}"
 export ORACLE_ITERS="${ORACLE_ITERS:-5}"
 export ORACLE_PROBE_TIMEOUT="${ORACLE_PROBE_TIMEOUT:-600}"
-export MAX_WORKERS_EVAL="${MAX_WORKERS_EVAL:-8}"
+export MAX_WORKERS_EVAL="${MAX_WORKERS_EVAL:-4}"
 export SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

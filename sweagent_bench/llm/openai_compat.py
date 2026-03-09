@@ -20,7 +20,7 @@ class ContextLengthError(RuntimeError):
 
 def get_base_url() -> str:
     """Get the OpenAI-compatible API base URL from environment."""
-    return os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
+    return os.environ.get("OPENAI_BASE_URL", "http://localhost:8001/v1")
 
 
 def get_api_key() -> str:
