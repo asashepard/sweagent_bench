@@ -30,6 +30,7 @@ echo "  Tensor parallel: $TP"
 
 python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
+    --host 0.0.0.0 \
     --port "$PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_UTIL" \

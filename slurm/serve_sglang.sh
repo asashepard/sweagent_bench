@@ -30,6 +30,7 @@ echo "  Tensor parallel: $TP"
 
 python -m sglang.launch_server \
     --model-path "$MODEL" \
+    --host 0.0.0.0 \
     --port "$PORT" \
     --context-length "$MAX_MODEL_LEN" \
     --mem-fraction-static "$GPU_UTIL" \
