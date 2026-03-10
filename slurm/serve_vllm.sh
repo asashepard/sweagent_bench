@@ -37,5 +37,4 @@ python -m vllm.entrypoints.openai.api_server \
     --max-model-len "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_UTIL" \
     --tensor-parallel-size "$TP" \
-    --trust-remote-code \
-    --disable-log-requests
+    --trust-remote-code

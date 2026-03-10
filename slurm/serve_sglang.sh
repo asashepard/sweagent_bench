@@ -37,5 +37,4 @@ python -m sglang.launch_server \
     --context-length "$MAX_MODEL_LEN" \
     --mem-fraction-static "$GPU_UTIL" \
     --tp-size "$TP" \
-    --trust-remote-code \
-    --disable-log-requests
+    --trust-remote-code
