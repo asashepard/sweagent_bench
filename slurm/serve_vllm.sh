@@ -17,10 +17,12 @@ set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 
-# Activate conda env
+# Activate conda env (non-interactive SLURM jobs don't source .bashrc)
 CONDA_ENV="${CONDA_ENV:-sweagent}"
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV"
+if [ -f /shared/bin/anaconda3/etc/profile.d/conda.sh ]; then
+    source /shared/bin/anaconda3/etc/profile.d/conda.sh
+    conda activate "$CONDA_ENV"
+fi
 
 MODEL="${MODEL:-Qwen/Qwen3.5-35B-A3B}"
 PORT="${PORT:-8001}"
