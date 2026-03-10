@@ -15,6 +15,8 @@
 
 set -euo pipefail
 
+export PYTHONUNBUFFERED=1
+
 MODEL="${MODEL:-Qwen/Qwen3.5-35B-A3B}"
 PORT="${PORT:-8001}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
