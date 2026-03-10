@@ -14,6 +14,13 @@
 
 set -euo pipefail
 
+export PYTHONUNBUFFERED=1
+
+# Activate conda env
+CONDA_ENV="${CONDA_ENV:-sweagent}"
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
+
 # ── Configuration ─────────────────────────────────────────────
 export MODEL="${MODEL:-Qwen/Qwen3.5-35B-A3B}"
 export EXPERIMENT_ID="${EXPERIMENT_ID:-exp_slurm_$(date +%Y%m%d_%H%M%S)}"
@@ -31,14 +38,7 @@ export SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PROJECT_ROOT"
-
-# Activate venv
-if [[ -d ".venv" ]]; then
-    source .venv/bin/activate
-fi
-
-mkdir -p logs
+cd "$PROJECT_ROOT"\n\nmkdir -p logs
 
 echo "SLURM Job ID: $SLURM_JOB_ID"
 echo "Node: $(hostname)"

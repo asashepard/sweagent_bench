@@ -13,6 +13,11 @@
 
 export PYTHONUNBUFFERED=1
 
+# Activate conda env
+CONDA_ENV="${CONDA_ENV:-sweagent}"
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
+
 echo "=== Debug info ==="
 echo "Node: $(hostname)"
 echo "Date: $(date)"
