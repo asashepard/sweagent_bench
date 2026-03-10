@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Debug script — run vLLM interactively to see all output.
+# Debug script — run SGLang interactively to see all output.
 #
-#SBATCH --job-name=debug-vllm
+#SBATCH --job-name=debug-sglang
 #SBATCH --partition=gpmoo-a
 #SBATCH --nodelist=gpmoo-a1
 #SBATCH --gres=gpu:1
@@ -19,24 +19,22 @@ echo "Date: $(date)"
 echo "Which python: $(which python)"
 echo "Python version: $(python --version 2>&1)"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-not set}"
-echo "nvidia-smi:"
-nvidia-smi 2>&1 || echo "nvidia-smi failed"
 echo ""
 
-echo "=== Testing vllm import ==="
-python -c "import vllm; print('vllm version:', vllm.__version__)" 2>&1
-echo "vllm import exit code: $?"
+echo "=== Testing sglang import ==="
+python -c "import sglang; print('sglang version:', sglang.__version__)" 2>&1
+echo "sglang import exit code: $?"
 echo ""
 
-echo "=== Starting vLLM server ==="
-python -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen3.5-35B-A3B \
+echo "=== Starting SGLang server ==="
+python -m sglang.launch_server \
+    --model-path Qwen/Qwen3.5-35B-A3B \
     --host 0.0.0.0 \
     --port 8001 \
-    --max-model-len 16384 \
-    --gpu-memory-utilization 0.90 \
-    --tensor-parallel-size 1 \
+    --context-length 16384 \
+    --mem-fraction-static 0.90 \
+    --tp-size 1 \
     --trust-remote-code \
     2>&1
 
-echo "=== vLLM exited with code: $? ==="
+echo "=== SGLang exited with code: $? ==="
