@@ -1,14 +1,62 @@
 [
-  {"repo": "django/django", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/django__django/train.jsonl"},
-  {"repo": "astropy/astropy", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/astropy__astropy/train.jsonl"},
-  {"repo": "sympy/sympy", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/sympy__sympy/train.jsonl"},
-  {"repo": "scikit-learn/scikit-learn", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/scikit-learn__scikit-learn/train.jsonl"},
-  {"repo": "matplotlib/matplotlib", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/matplotlib__matplotlib/train.jsonl"},
-  {"repo": "pallets/flask", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/pallets__flask/train.jsonl"},
-  {"repo": "sphinx-doc/sphinx", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/sphinx-doc__sphinx/train.jsonl"},
-  {"repo": "pylint-dev/pylint", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/pylint-dev__pylint/train.jsonl"},
-  {"repo": "pytest-dev/pytest", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/pytest-dev__pytest/train.jsonl"},
-  {"repo": "psf/requests", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/psf__requests/train.jsonl"},
-  {"repo": "pydata/xarray", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/pydata__xarray/train.jsonl"},
-  {"repo": "mwaskom/seaborn", "commit": "PINNED_SHA_REQUIRED", "tasks_file": "artifacts/tasks/mwaskom__seaborn/train.jsonl"}
+  {
+    "repo": "django/django",
+    "commit": "3483bfc0920b0ef0b28563aabe8ff546699b6ece",
+    "tasks_file": "artifacts/tasks/django__django/train.jsonl"
+  },
+  {
+    "repo": "astropy/astropy",
+    "commit": "3ea21778d960863c2300cd2c28c1dde31f924d45",
+    "tasks_file": "artifacts/tasks/astropy__astropy/train.jsonl"
+  },
+  {
+    "repo": "sympy/sympy",
+    "commit": "aad84290e85b9fb19894f330c3052702c65f79aa",
+    "tasks_file": "artifacts/tasks/sympy__sympy/train.jsonl"
+  },
+  {
+    "repo": "scikit-learn/scikit-learn",
+    "commit": "08f9b20d69a787a5a1e06e0ba6dd8693aeb5d223",
+    "tasks_file": "artifacts/tasks/scikit-learn__scikit-learn/train.jsonl"
+  },
+  {
+    "repo": "matplotlib/matplotlib",
+    "commit": "59eafb86ba9f61bb6955260aadb9a4f48fcc14bb",
+    "tasks_file": "artifacts/tasks/matplotlib__matplotlib/train.jsonl"
+  },
+  {
+    "repo": "pallets/flask",
+    "commit": "4cae5d8e411b1e69949d8fae669afeacbd3e5908",
+    "tasks_file": "artifacts/tasks/pallets__flask/train.jsonl"
+  },
+  {
+    "repo": "sphinx-doc/sphinx",
+    "commit": "cc7c6f435ad37bb12264f8118c8461b230e6830c",
+    "tasks_file": "artifacts/tasks/sphinx-doc__sphinx/train.jsonl"
+  },
+  {
+    "repo": "pylint-dev/pylint",
+    "commit": "b6844102c66c5427a8abbf828f862eed2ba77f34",
+    "tasks_file": "artifacts/tasks/pylint-dev__pylint/train.jsonl"
+  },
+  {
+    "repo": "pytest-dev/pytest",
+    "commit": "55560d9d4187feecea18b1e637f43f55912d0303",
+    "tasks_file": "artifacts/tasks/pytest-dev__pytest/train.jsonl"
+  },
+  {
+    "repo": "psf/requests",
+    "commit": "0e4ae38f0c93d4f92a96c774bd52c069d12a4798",
+    "tasks_file": "artifacts/tasks/psf__requests/train.jsonl"
+  },
+  {
+    "repo": "pydata/xarray",
+    "commit": "c9ac506d723485adc7e75934739b3093227cce08",
+    "tasks_file": "artifacts/tasks/pydata__xarray/train.jsonl"
+  },
+  {
+    "repo": "mwaskom/seaborn",
+    "commit": "32088bbc3adc611b7118e57fce6d4ed096a76a29",
+    "tasks_file": "artifacts/tasks/mwaskom__seaborn/train.jsonl"
+  }
 ]
