@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test cache
+.pytest_cache/
+
+# Artifacts (large/generated)
+artifacts/repos_cache/
+artifacts/worktrees/
+artifacts/preds/
+artifacts/logs/
+
+# Experiment results (reproduced via the pipeline)
+results/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Drafts
+*.pdf

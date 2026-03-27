@@ -5,7 +5,7 @@
 #   ./run_experiment.sh [--dry-run] [--conditions COND...] [--ids IDS_FILE]
 #
 # Required env vars:
-#   OPENAI_BASE_URL  — vLLM endpoint (e.g. http://gpmoo-a1:8000/v1)
+#   OPENAI_BASE_URL  — vLLM/SGLang endpoint (e.g. http://localhost:8000/v1)
 #
 # Optional env vars:
 #   MODEL            — model name (default: Qwen/Qwen3.5-35B)

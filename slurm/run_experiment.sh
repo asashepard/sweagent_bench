@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=sweagent-bench
-#SBATCH --partition=gpmoo-a
+#SBATCH --partition=PARTITION        # <-- set your SLURM partition
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00
-#SBATCH --output=/shared/27as66/sweagent_bench/logs/experiment_%j.out
-#SBATCH --error=/shared/27as66/sweagent_bench/logs/experiment_%j.err
+#SBATCH --output=logs/experiment_%j.out
+#SBATCH --error=logs/experiment_%j.err
 set -euo pipefail
 
-export MODEL="${MODEL:-Qwen/Qwen3.5-35B}"
+# ── Configuration (override via env vars when submitting) ─────
+export MODEL="${MODEL:-Qwen/Qwen3.5-35B-A3B}"
 export EXPERIMENT_ID="${EXPERIMENT_ID:-exp_slurm_$(date +%Y%m%d_%H%M%S)}"
-export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://gpmoo-a1:8000/v1}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://localhost:8000/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 export CONDITIONS="${CONDITIONS:-no_context static_kb oracle_tuned}"
 export IDS_FILE="${IDS_FILE:-ids/verified_mini_ids.txt}"
@@ -23,9 +24,11 @@ export ORACLE_PROBE_TIMEOUT="${ORACLE_PROBE_TIMEOUT:-600}"
 export MAX_WORKERS_EVAL="${MAX_WORKERS_EVAL:-8}"
 export SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-1}"
 
-PROJECT_ROOT="/shared/27as66/sweagent_bench"
+# ── Project root (set to your checkout location) ─────────────
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$PROJECT_ROOT"
 
+# Activate virtual environment if present
 if [[ -d ".venv" ]]; then
     source .venv/bin/activate
 fi

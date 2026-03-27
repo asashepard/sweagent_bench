@@ -5,7 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sweagent-bench"
 version = "0.1.0"
+description = "Iterative probe-and-refine tuning of repository guidance for AI coding agents"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Asa Shepard", email = "as66@williams.edu" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "swebench>=2.0.0",
     "requests>=2.31.0",
@@ -14,6 +26,9 @@ dependencies = [
     "tree-sitter>=0.23",
     "tree-sitter-python>=0.23",
 ]
+
+[project.urls]
+Repository = "https://github.com/asashepard/sweagent_bench"
 
 [tool.setuptools.packages.find]
 where = ["."]

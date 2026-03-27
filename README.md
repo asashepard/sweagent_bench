@@ -1,84 +1,138 @@
-# sweagent-bench
+# Probe-and-Refine Tuning of Repository Guidance for AI Coding Agents
 
-SWE-agent + Qwen 3.5 35B + vLLM + SWE-bench harness experiment pipeline.
+[![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-Three experimental conditions:
-- **no_context**: agent sees only the issue + file tree
-- **static_kb**: agent sees issue + tree + deterministic AGENTS.md from tree-sitter KB
-- **oracle_tuned**: agent sees issue + tree + LLM-as-judge refined AGENTS.md
+This repository contains the code for the paper:
 
-## Quick Start
+> **Iterative Probe-and-Refine Tuning of Repository Guidance for AI Coding Agents**
+> Asa Shepard (Williams College)
+> *arXiv preprint, 2026*
+
+## Overview
+
+Probe-and-refine tuning is a lightweight context-engineering procedure that iteratively improves repository-level guidance (AGENTS.md) for AI coding agents. Each iteration uses four single-shot LLM calls:
+
+1. **Generate a probe** -- a synthetic bug-fix task from the repository's codebase
+2. **Generate an attempted solution** given the current guidance
+3. **Diagnose** what went wrong in the attempt
+4. **Edit the guidance** to address the diagnosed failure
+
+After 2--5 iterations per repository, generic instructions like *"reproduce the failure before editing"* become repo-specific strategies like *"trace through subclasses.py to map parent-child relationships."* No multi-step agent loop, no reinforcement learning, and no tool use during the tuning process.
+
+### Key Results
+
+SWE-bench Verified (500 instances, [Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B), 200 agent steps):
+
+| Condition | Resolve Rate | Unique Solves |
+|-----------|:---:|:---:|
+| No Context (baseline) | 22.8% | 18 |
+| Static KB | 27.4% | 9 |
+| **Probe-and-Refine** | **34.2%** | **41** |
+
+The improvement comes from **evaluation coverage**: the guided agent produces well-formed, evaluable patches for 57% of instances vs. 37% for the baseline, while per-patch precision is constant at ~59% across all conditions.
+
+## Setup
 
 ```bash
+# Python 3.11+ required
 pip install -e .
-
-# Set the vLLM endpoint (required)
-export OPENAI_BASE_URL=http://gpmoo-a1:8000/v1
-
-# Run with defaults (50 verified instances, all 3 conditions)
-bash scripts/run_experiment.sh
-
-# Or override via env vars / CLI flags:
-IDS_FILE=ids/verified_smoke_4_ids.txt \
-  bash scripts/run_experiment.sh --conditions no_context static_kb oracle_tuned
 ```
 
-## Serve vLLM
+**Requirements:** [SWE-bench](https://github.com/princeton-nlp/SWE-bench) >= 2.0.0, [tree-sitter](https://tree-sitter.github.io/tree-sitter/) >= 0.23, Docker, and an OpenAI-compatible inference endpoint (e.g., [SGLang](https://github.com/sgl-project/sglang)).
+
+## Reproducing Paper Results
+
+### 1. Serve the model
+
+The paper's experiments used SGLang to serve Qwen3.5-35B-A3B on a single GPU:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model <checkpoint> \
-  --max-model-len 32768 \
-  --gpu-memory-utilization 0.90 \
-  --host 0.0.0.0 --port 8000
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3.5-35B-A3B \
+  --host 0.0.0.0 --port 8000 \
+  --tp-size 1 \
+  --context-length 16384 \
+  --mem-fraction-static 0.90
 ```
 
-## SLURM Batch Runs
+A SLURM batch script is provided at `slurm/serve_sglang.sh`.
 
-Use the provided SLURM scripts with env-var overrides for clean, repeatable runs.
+### 2. Run experiments
 
 ```bash
-# Submit vLLM server job
-sbatch slurm/serve_vllm.sh
+export OPENAI_BASE_URL=http://localhost:8000/v1
+export OPENAI_API_KEY=EMPTY
 
-# Submit experiment job (all defaults)
-sbatch slurm/run_experiment.sh
-
-# Submit experiment with overrides
-MODEL=Qwen/Qwen3.5-35B \
-OPENAI_BASE_URL=http://gpmoo-a1:8000/v1 \
-EXPERIMENT_ID=exp_oracle_runner_$(date +%Y%m%d_%H%M%S) \
+# Full 500-instance run, all 3 conditions, 200 steps (Table 4 in the paper)
+MODEL=Qwen/Qwen3.5-35B-A3B \
+IDS_FILE=ids/verified_full_ids.txt \
 CONDITIONS="no_context static_kb oracle_tuned" \
-IDS_FILE=ids/verified_smoke_4_ids.txt \
-ORACLE_ITERS=3 \
-ORACLE_PROBE_TIMEOUT=180 \
+STEP_LIMIT=200 \
+ORACLE_ITERS=5 \
 TIMEOUT=1800 \
-STEP_LIMIT=50 \
-sbatch slurm/run_experiment.sh
+  bash scripts/run_experiment.sh
 ```
 
-`slurm/run_experiment.sh` forwards those values to `scripts/run_experiment.sh`,
-which passes `--oracle-probe-timeout` to the CLI.
+Results are written to `results/<experiment_id>/`. SLURM scripts for cluster environments are in `slurm/`.
 
-## Output
+### Experimental conditions
+
+The three conditions correspond to the paper's terminology:
+
+| Code | Paper | Description |
+|------|-------|-------------|
+| `no_context` | No Context | Issue + file tree only (baseline) |
+| `static_kb` | Static KB | Issue + tree + deterministic AGENTS.md from tree-sitter analysis |
+| `oracle_tuned` | Probe-and-Refine | Issue + tree + iteratively refined AGENTS.md |
+
+### Key parameters
+
+| Parameter | Paper value | Notes |
+|-----------|:-----------:|-------|
+| Model | Qwen/Qwen3.5-35B-A3B | 3B active params via MoE |
+| Instances | 500 | SWE-bench Verified (`ids/verified_full_ids.txt`) |
+| Step budget | 200 | Primary; also 25, 50, 100 for budget analysis |
+| Oracle iterations | 5 | Per repository |
+| Temperature | 0.0 / 0.7 | Inference / probe generation |
+| Context window | 16k | Hard truncation |
+| Repository commits | Pinned | See `configs/repos_12.json` |
+
+### Quick smoke test
+
+```bash
+# 4 instances, fast iteration
+IDS_FILE=ids/verified_smoke_4_ids.txt bash scripts/run_experiment.sh
+```
+
+## Repository Structure
 
 ```
-results/<exp_id>/
-  experiment_config.json
-  experiment_state.json
-  experiment_summary.json
-  guidance/<repo>/...
-  metrics/
-  logs/
+sweagent_bench/       # Main Python package
+  orchestrator.py     #   Experiment orchestration (tuning + evaluation)
+  generation/         #   Patch generation via agent loop + single-shot fallback
+  oracle/             #   Probe-and-refine tuning loop (Section 3.3)
+  kb/                 #   Knowledge base building and AGENTS.md rendering
+  probes/             #   Tree-sitter static analysis
+configs/              # Pinned repository commits (repos_12.json)
+ids/                  # Instance ID lists (smoke, mini, stratified, full 500)
+scripts/              # Experiment runner shell scripts
+slurm/                # SLURM batch job scripts
+tests/                # Unit tests
 ```
 
-`metrics/<condition>_instances.jsonl` records per-instance runner accounting, including:
-- `steps_taken`, `elapsed_s`, `wall_s`, `patch_len_chars`
-- `patch_source`, `fallback_single_shot_used`, `fallback_reason`
-- `stall_type`, `stall_repeat_count`, `no_bash_block_count`, `empty_bash_block_count`
-- `token_usage_source` (`reported` or `estimated`)
-- `token_usage`, `reported_tokens`, `estimated_tokens`
+## Citation
 
-`experiment_summary.json` includes condition-level aggregates under each condition's
-`generation_metrics`, including patch yield/rates, patch-size averages, step efficiency,
-fallback usage, token totals/rates, and patch-source distribution.
+```bibtex
+@article{shepard2026proberefine,
+  title={Iterative Probe-and-Refine Tuning of Repository Guidance for AI Coding Agents},
+  author={Shepard, Asa},
+  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  year={2026}
+}
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

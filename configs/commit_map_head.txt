@@ -1,5 +1,0 @@
-# DEPRECATED: commit pinning is now done via the "commit" field in repos_12.json.
-# Each repo entry must have an explicit full-length SHA. HEAD is no longer accepted.
-# To get current HEAD SHAs, run:
-#   git ls-remote https://github.com/<owner>/<repo>.git HEAD
-# Then paste the SHA into repos_12.json.

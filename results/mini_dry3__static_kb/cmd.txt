@@ -1,1 +1,0 @@
-python -m swebench.harness.run_evaluation     --dataset_name princeton-nlp/SWE-bench_Verified     --predictions_path C:codesweagent_benchartifactspredsmini_dry3static_kbpreds.jsonl     --max_workers 4     --run_id mini_dry3__static_kb

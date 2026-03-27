@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper."
+title: "Iterative Probe-and-Refine Tuning of Repository Guidance for AI Coding Agents"
+type: article
+authors:
+  - family-names: Shepard
+    given-names: Asa
+    affiliation: Williams College
+    email: as66@williams.edu
+date-released: 2026-03-20
+url: "https://github.com/asashepard/sweagent_bench"
+license: MIT
+keywords:
+  - coding agents
+  - AGENTS.md
+  - SWE-bench
+  - context engineering
+  - probe-and-refine

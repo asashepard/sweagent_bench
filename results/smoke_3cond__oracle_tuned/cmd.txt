@@ -1,1 +1,0 @@
-python -m swebench.harness.run_evaluation     --dataset_name princeton-nlp/SWE-bench_Verified     --predictions_path C:codesweagent_benchartifactspredssmoke_3condoracle_tunedpreds.jsonl     --max_workers 4     --run_id smoke_3cond__oracle_tuned
